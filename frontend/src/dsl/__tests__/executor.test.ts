@@ -17,17 +17,17 @@ function buildModel(params, api) {
 `;
 
 describe("executeParametricScript", () => {
-  it("loads schema and compiles a model into validated IR", () => {
-    const result = executeParametricScript(script);
+  it("loads schema and compiles a model into validated IR", async () => {
+    const result = await executeParametricScript(script);
     expect(result.schema?.params.width?.type).toBe("number");
     expect(result.ir?.entities[0]?.id).toBe("patch");
     expect(result.diagnostics).toHaveLength(0);
     expect(serializeModelIR(result.ir!)).toContain('"version":1');
   });
 
-  it("reports schema and model failures without throwing", () => {
-    expect(executeParametricScript("function defineParams() { return {}; }").diagnostics[0]).toMatchObject({ phase: "schema" });
-    const result = executeParametricScript(`${script}\nfunction buildModel() { throw new Error("bad geometry"); }`);
+  it("reports schema and model failures without throwing", async () => {
+    expect((await executeParametricScript("function defineParams() { return {}; }")).diagnostics[0]).toMatchObject({ phase: "schema" });
+    const result = await executeParametricScript(`${script}\nfunction buildModel() { throw new Error("bad geometry"); }`);
     expect(result.diagnostics[0]).toMatchObject({ phase: "model", message: "bad geometry" });
   });
 });

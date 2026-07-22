@@ -1,4 +1,4 @@
-import { executeParametricScript } from "./executor";
+import { executeParametricScript, type ScriptExecution } from "./executor";
 
 export interface ScriptWorkerRequest {
   code: string;
@@ -6,14 +6,12 @@ export interface ScriptWorkerRequest {
 }
 
 export interface ScriptWorkerResponse {
-  result: ReturnType<typeof executeParametricScript>;
+  result: ScriptExecution;
 }
 
 self.onmessage = (event: MessageEvent<ScriptWorkerRequest>) => {
-  try {
-    const result = executeParametricScript(event.data.code, event.data.values);
-    (self as unknown as Worker).postMessage({ result } satisfies ScriptWorkerResponse);
-  } catch (error) {
-    (self as unknown as Worker).postMessage({ result: { diagnostics: [{ phase: "model", message: String(error) }] } });
-  }
+  void executeParametricScript(event.data.code, event.data.values).then(
+    (result) => (self as unknown as Worker).postMessage({ result } satisfies ScriptWorkerResponse),
+    (error: unknown) => (self as unknown as Worker).postMessage({ result: { diagnostics: [{ phase: "model", message: String(error) }] } }),
+  );
 };

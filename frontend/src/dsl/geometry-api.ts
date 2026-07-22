@@ -24,7 +24,7 @@ export function createGeometryApi(paramSchemaVersion: 1): { api: GeometryApi; ir
     material(name, spec) {
       if (!name || ir.materials.some((material) => material.name === name)) throw new Error(`Duplicate or empty material "${name}"`);
       if (!Number.isFinite(spec.epsilon_r) || spec.epsilon_r < 1) throw new Error(`Invalid epsilon_r for "${name}"`);
-      const material = { name, mu_r: 1, ...spec };
+      const material = { ...spec, name, mu_r: spec.mu_r ?? 1 };
       ir.materials.push(material);
       return material;
     },

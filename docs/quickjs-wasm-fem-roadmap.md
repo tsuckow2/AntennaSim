@@ -78,6 +78,30 @@ mesher or solver.
 - Map validation and script errors back to parameter keys.
 - Persist and restore parameter sets as JSON presets.
 
+### Phase 2b: Parametric script editor UI
+
+- Add a `/parametric` route and a top-level `ParametricEditorPage` (its own
+  tab in the navbar, alongside the Wire Editor).
+- Create a `dslStore` holding script source, param values, the last
+  `ScriptExecution` result, run status, and diagnostics.
+- Add a `ScriptEditorPanel` with an editable script textarea, a Run button
+  that calls `runParametricScript` in a Web Worker, and inline
+  phase-labelled diagnostics below the editor.
+- Add a `ParamSchemaForm` component that renders the schema returned by
+  `defineParams()`: number/int fields use sliders or number inputs, bool
+  uses a checkbox, string uses a text input, enum uses a select, and vector
+  uses a row of number inputs. Group headings from `schema.groups` are
+  shown. Constraint violations are surfaced inline. Changing any value
+  re-runs `buildModel` (debounced) and updates the IR in the store.
+- Add a `ModelIRPreview` Three.js scene that visualises the current IR:
+  `box` entities as translucent box meshes, `sheetRect` as thin planes,
+  lumped ports as marker spheres, and the airbox/PML as a wireframe
+  bounding cube. Materials are colour-coded.
+- Support saving and restoring param values as JSON presets (reuse the
+  `ProjectActions` pattern).
+- Mobile layout: bottom-sheet tabs for Script, Params, Preview, and
+  Diagnostics.
+
 ### Phase 3: Geometry API and ModelIR compiler
 
 - Add v1 primitives: `box`, `sheetRect`, materials, lumped ports, airbox,
@@ -135,7 +159,9 @@ mesher or solver.
 ## Milestones
 
 - **M1:** A browser script executes and returns a validated parameter schema.
-- **M2:** Arbitrary parameters generate a working form and validated preset.
+- **M2:** The parametric editor tab is live: the example script runs, the
+  schema-driven form renders, parameters update the IR in real time, and
+  the 3D ModelIR preview is visible.
 - **M3:** A script compiles to valid ModelIR and a mesh preview.
 - **M4:** A scripted model produces an end-to-end frequency sweep and S11 plot.
 - **M5:** A 918 MHz template can be swept and reports the best result.
@@ -145,14 +171,18 @@ mesher or solver.
 1. Define ParamSchema specification and JSON Schema.
 2. Implement the QuickJS-WASM sandbox with timeout and memory limits.
 3. Add the `defineParams`/`buildModel` loader and structured error reporting.
-4. Build the schema-driven parameter form renderer in the web UI.
-5. Implement Geometry API v1: `box`, `sheetRect`, `material`, and
+4. Add a `/parametric` route, `ParametricEditorPage`, and `dslStore`.
+5. Add `ScriptEditorPanel` with inline diagnostics and worker integration.
+6. Build the `ParamSchemaForm` schema-driven parameter form renderer.
+7. Add `ModelIRPreview` Three.js scene for geometry visualisation.
+8. Support JSON preset save/restore for parameter values.
+9. Implement Geometry API v1: `box`, `sheetRect`, `material`, and
    `lumpedPort`.
-6. Define ModelIR v1 and its serializer.
-7. Add IR validation for topology, materials, references, and ports.
-8. Implement IR-to-Gmsh conversion and mesh diagnostics.
-9. Integrate the solver client for frequency sweeps and S11 plots.
-10. Add the documented `patch_918_petg.js` example.
+10. Define ModelIR v1 and its serializer.
+11. Add IR validation for topology, materials, references, and ports.
+12. Implement IR-to-Gmsh conversion and mesh diagnostics.
+13. Integrate the solver client for frequency sweeps and S11 plots.
+14. Add the documented `patch_918_petg.js` example.
 
 The sequence is the default blocking order. Work may overlap when an interface
 is stable, but later work must not bypass validation or silently couple the

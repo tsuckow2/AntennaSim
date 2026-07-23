@@ -78,7 +78,7 @@ mesher or solver.
 - Map validation and script errors back to parameter keys.
 - Persist and restore parameter sets as JSON presets.
 
-### Phase 2b: Parametric script editor UI
+### Phase 2b: Parametric script editor UI ✅ Complete
 
 - Add a `/parametric` route and a top-level `ParametricEditorPage` (its own
   tab in the navbar, alongside the Wire Editor).
@@ -159,7 +159,7 @@ mesher or solver.
 ## Milestones
 
 - **M1:** A browser script executes and returns a validated parameter schema.
-- **M2:** The parametric editor tab is live: the example script runs, the
+- **M2 ✅:** The parametric editor tab is live: the example script runs, the
   schema-driven form renders, parameters update the IR in real time, and
   the 3D ModelIR preview is visible.
 - **M3:** A script compiles to valid ModelIR and a mesh preview.
@@ -171,11 +171,11 @@ mesher or solver.
 1. Define ParamSchema specification and JSON Schema.
 2. Implement the QuickJS-WASM sandbox with timeout and memory limits.
 3. Add the `defineParams`/`buildModel` loader and structured error reporting.
-4. Add a `/parametric` route, `ParametricEditorPage`, and `dslStore`.
-5. Add `ScriptEditorPanel` with inline diagnostics and worker integration.
-6. Build the `ParamSchemaForm` schema-driven parameter form renderer.
-7. Add `ModelIRPreview` Three.js scene for geometry visualisation.
-8. Support JSON preset save/restore for parameter values.
+4. ✅ Add a `/parametric` route, `ParametricEditorPage`, and `dslStore`.
+5. ✅ Add `ScriptEditorPanel` with inline diagnostics and worker integration.
+6. ✅ Build the `ParamSchemaForm` schema-driven parameter form renderer.
+7. ✅ Add `ModelIRPreview` Three.js scene for geometry visualisation.
+8. ✅ Support JSON preset save/restore for parameter values.
 9. Implement Geometry API v1: `box`, `sheetRect`, `material`, and
    `lumpedPort`.
 10. Define ModelIR v1 and its serializer.

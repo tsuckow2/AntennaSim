@@ -25,15 +25,23 @@ export default defineConfig({
     chunkSizeWarningLimit: 750,
     rollupOptions: {
       output: {
-        manualChunks: {
-          three: ["three"],
-          "three-ecosystem": [
-            "@react-three/fiber",
-            "@react-three/drei",
-            "@react-three/postprocessing",
-          ],
-          recharts: ["recharts"],
-          react: ["react", "react-dom", "react-router-dom"],
+        manualChunks(id) {
+          if (id.includes("node_modules/three/")) return "three";
+          if (
+            id.includes("node_modules/@react-three/fiber/") ||
+            id.includes("node_modules/@react-three/drei/") ||
+            id.includes("node_modules/@react-three/postprocessing/")
+          ) {
+            return "three-ecosystem";
+          }
+          if (id.includes("node_modules/recharts/")) return "recharts";
+          if (
+            id.includes("node_modules/react/") ||
+            id.includes("node_modules/react-dom/") ||
+            id.includes("node_modules/react-router-dom/")
+          ) {
+            return "react";
+          }
         },
       },
     },

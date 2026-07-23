@@ -16,12 +16,6 @@ export default defineConfig({
       "@": path.resolve(__dirname, "./src"),
     },
   },
-  optimizeDeps: {
-    // QuickJS imports its Emscripten WASM through package-relative URLs.
-    // Prebundling rewrites those URLs into /node_modules/.vite/deps without
-    // copying the sibling WASM asset.
-    exclude: ["quickjs-emscripten"],
-  },
   server: {
     host: "0.0.0.0",
     port: 5173,
@@ -31,15 +25,23 @@ export default defineConfig({
     chunkSizeWarningLimit: 750,
     rollupOptions: {
       output: {
-        manualChunks: {
-          three: ["three"],
-          "three-ecosystem": [
-            "@react-three/fiber",
-            "@react-three/drei",
-            "@react-three/postprocessing",
-          ],
-          recharts: ["recharts"],
-          react: ["react", "react-dom", "react-router-dom"],
+        manualChunks(id) {
+          if (id.includes("node_modules/three/")) return "three";
+          if (
+            id.includes("node_modules/@react-three/fiber/") ||
+            id.includes("node_modules/@react-three/drei/") ||
+            id.includes("node_modules/@react-three/postprocessing/")
+          ) {
+            return "three-ecosystem";
+          }
+          if (id.includes("node_modules/recharts/")) return "recharts";
+          if (
+            id.includes("node_modules/react/") ||
+            id.includes("node_modules/react-dom/") ||
+            id.includes("node_modules/react-router-dom/")
+          ) {
+            return "react";
+          }
         },
       },
     },

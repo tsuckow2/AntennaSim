@@ -16,6 +16,12 @@ export default defineConfig({
       "@": path.resolve(__dirname, "./src"),
     },
   },
+  optimizeDeps: {
+    // QuickJS imports its Emscripten WASM through package-relative URLs.
+    // Prebundling rewrites those URLs into /node_modules/.vite/deps without
+    // copying the sibling WASM asset.
+    exclude: ["quickjs-emscripten"],
+  },
   server: {
     host: "0.0.0.0",
     port: 5173,

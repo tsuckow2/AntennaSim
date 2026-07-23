@@ -13,6 +13,7 @@ import { useUIStore } from "../../stores/uiStore";
 const NAV_LINKS = [
   { to: "/", label: "Simulator", featured: false },
   { to: "/editor", label: "Wire Editor", featured: true },
+  { to: "/parametric", label: "Parametric", featured: true },
   { to: "/library", label: "Library", featured: false },
   { to: "/learn", label: "Learn", featured: false },
   { to: "/about", label: "About", featured: false },

@@ -1,6 +1,7 @@
 import { Routes, Route } from "react-router-dom";
 import { SimulatorPage } from "./pages/SimulatorPage";
 import { EditorPage } from "./pages/EditorPage";
+import { ParametricEditorPage } from "./pages/ParametricEditorPage";
 import { LibraryPage } from "./pages/LibraryPage";
 import { LearnPage } from "./pages/LearnPage";
 import { AboutPage } from "./pages/AboutPage";
@@ -11,6 +12,7 @@ export function AppRoutes() {
     <Routes>
       <Route path="/" element={<SimulatorPage />} />
       <Route path="/editor" element={<EditorPage />} />
+      <Route path="/parametric" element={<ParametricEditorPage />} />
       <Route path="/library" element={<LibraryPage />} />
       <Route path="/learn" element={<LearnPage />} />
       <Route path="/about" element={<AboutPage />} />

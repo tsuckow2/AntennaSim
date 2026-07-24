@@ -129,19 +129,21 @@ function MaterialsMap({ ir }: { ir: ModelIR }) {
         return null;
       })}
 
-      {/* Lumped ports — small sphere at midpoint */}
+      {/* Lumped ports — separate positive and negative terminal markers */}
       {ir.ports.map((port) => {
-        const mid: Vec3 = [
-          (port.positive[0] + port.negative[0]) / 2,
-          (port.positive[1] + port.negative[1]) / 2,
-          (port.positive[2] + port.negative[2]) / 2,
-        ];
-        const [px, py, pz] = irToThree(mid);
+        const [positiveX, positiveY, positiveZ] = irToThree(port.positive);
+        const [negativeX, negativeY, negativeZ] = irToThree(port.negative);
         return (
-          <mesh key={port.id} position={[px, py, pz]}>
-            <sphereGeometry args={[0.003, 8, 8]} />
-            <meshStandardMaterial color="#FF4444" emissive="#FF2222" emissiveIntensity={0.6} />
-          </mesh>
+          <group key={port.id}>
+            <mesh position={[positiveX, positiveY, positiveZ]}>
+              <sphereGeometry args={[0.001, 8, 8]} />
+              <meshStandardMaterial color="#FF4444" emissive="#FF2222" emissiveIntensity={0.6} />
+            </mesh>
+            <mesh position={[negativeX, negativeY, negativeZ]}>
+              <sphereGeometry args={[0.001, 8, 8]} />
+              <meshStandardMaterial color="#4488FF" emissive="#2244FF" emissiveIntensity={0.6} />
+            </mesh>
+          </group>
         );
       })}
 

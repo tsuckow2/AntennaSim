@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.13)
-project(nec2c-wasm C)
+project(nec2c-wasm C CXX)
 
 # nec2c source files (flat layout — all .c files in submodule root)
 set(NEC2C_DIR ${CMAKE_CURRENT_SOURCE_DIR}/nec2c)
@@ -51,5 +51,19 @@ target_link_options(nec2c PRIVATE
   # Don't exit the runtime after main() returns
   -sEXIT_RUNTIME=0
   # Optimization
+  -O3
+)
+
+add_executable(fem1d fem1d.cpp)
+set_target_properties(fem1d PROPERTIES SUFFIX ".js")
+target_link_options(fem1d PRIVATE
+  -sEXPORT_NAME=createFem1d
+  -sMODULARIZE=1
+  -sALLOW_MEMORY_GROWTH=1
+  -sINITIAL_MEMORY=16777216
+  -sEXPORTED_FUNCTIONS=_fem_solve,_malloc,_free
+  -sEXPORTED_RUNTIME_METHODS=HEAPF64
+  -sENVIRONMENT=web,worker
+  -sEXIT_RUNTIME=0
   -O3
 )

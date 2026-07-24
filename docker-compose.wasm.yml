@@ -1,0 +1,15 @@
+services:
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile.dev
+    ports:
+      - "5173:5173"
+    volumes:
+      - ./frontend/src:/app/src
+      - ./frontend/public:/app/public
+      - ./frontend/index.html:/app/index.html
+      - ./VERSION:/VERSION:ro
+      - ./CHANGELOG.md:/CHANGELOG.md:ro
+    environment:
+      - VITE_ENGINE=wasm

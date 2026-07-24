@@ -32,6 +32,9 @@ export type {
 } from "../api/nec";
 
 import type { SimulationResult, LumpedLoad, TransmissionLine, WireArc, GeometryTransformDef, CylindricalSymmetryDef } from "../api/nec";
+import type { FEMSimulationRequest, FEMSimulationResult } from "./fem";
+
+export type { FEMFrequencyPoint, FEMSimulationRequest, FEMSimulationResult } from "./fem";
 
 // ---- Simulation request types ----
 
@@ -205,4 +208,7 @@ export interface SimulationEngine {
     request: OptimizationRequest,
     onProgress: (progress: OptimizationProgress) => void,
   ): Promise<{ result: Promise<OptimizationResult>; cancel: () => void }>;
+
+  /** Run the browser-only FEM solver when supported by the selected engine. */
+  simulateFEM?(request: FEMSimulationRequest): Promise<FEMSimulationResult>;
 }

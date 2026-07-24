@@ -20,6 +20,12 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
+# Load the workspace-local Emscripten SDK when it has not already been activated.
+if ! command -v emcmake &> /dev/null && [ -f "/workspaces/emsdk/emsdk_env.sh" ]; then
+    # shellcheck disable=SC1091
+    source /workspaces/emsdk/emsdk_env.sh
+fi
+
 # Verify emscripten is available
 if ! command -v emcmake &> /dev/null; then
     echo "ERROR: Emscripten not found. Install emsdk and run 'source emsdk_env.sh' first."
@@ -54,8 +60,14 @@ cd build
 emcmake cmake .. -DCMAKE_BUILD_TYPE=Release
 emmake make -j$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)
 
+# Copy browser artifacts to the Vite public directory when building in-repo.
+if [ -d "../../frontend/public/wasm" ]; then
+    cp nec2c.js nec2c.wasm fem1d.js fem1d.wasm ../../frontend/public/wasm/
+fi
+
 echo ""
 echo "Build complete!"
-echo "  JS loader:  $(pwd)/nec2c.js"
-echo "  WASM binary: $(pwd)/nec2c.wasm"
-ls -lh nec2c.js nec2c.wasm 2>/dev/null || echo "(files not found — check build output above)"
+echo "  NEC2C JS loader:  $(pwd)/nec2c.js"
+echo "  FEM JS loader:    $(pwd)/fem1d.js"
+echo "  WASM binaries:    $(pwd)/nec2c.wasm $(pwd)/fem1d.wasm"
+ls -lh nec2c.js nec2c.wasm fem1d.js fem1d.wasm 2>/dev/null || echo "(files not found — check build output above)"

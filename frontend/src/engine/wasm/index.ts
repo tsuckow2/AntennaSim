@@ -24,6 +24,8 @@ import { parseNecFile } from "../parsers/nec-file";
 import { parseMaa } from "../parsers/maa-import";
 import { exportMaa } from "../parsers/maa-export";
 import { buildCardDeck } from "../parsers/nec-input";
+import type { FEMSimulationRequest, FEMSimulationResult } from "../fem";
+import type { FEMWorkerMessage, FEMWorkerResponse } from "./worker-fem";
 import type {
   WorkerRequest,
   WorkerResponse,
@@ -43,6 +45,7 @@ import {
 
 let simWorker: Worker | null = null;
 let optWorker: Worker | null = null;
+let femWorker: Worker | null = null;
 
 function getSimWorker(): Worker {
   if (!simWorker) {
@@ -64,6 +67,11 @@ function getOptWorker(): Worker {
   return optWorker;
 }
 
+function getFemWorker(): Worker {
+  if (!femWorker) femWorker = new Worker(new URL("./worker-fem.ts", import.meta.url), { type: "module" });
+  return femWorker;
+}
+
 // ---------------------------------------------------------------------------
 // Pending request tracking
 // ---------------------------------------------------------------------------
@@ -79,6 +87,30 @@ let nextRequestId = 0;
 
 function generateId(): string {
   return `req-${++nextRequestId}-${Date.now().toString(36)}`;
+}
+
+const pendingFEMRequests = new Map<string, { resolve: (result: FEMSimulationResult) => void; reject: (error: Error) => void }>();
+let femWorkerListenerAttached = false;
+
+function ensureFEMWorkerListener(): void {
+  if (femWorkerListenerAttached) return;
+  femWorkerListenerAttached = true;
+  getFemWorker().addEventListener("message", (event: MessageEvent<FEMWorkerResponse>) => {
+    const pending = pendingFEMRequests.get(event.data.id);
+    if (!pending) return;
+    pendingFEMRequests.delete(event.data.id);
+    if (event.data.type === "success") pending.resolve(event.data.result);
+    else pending.reject(new Error(event.data.message));
+  });
+  getFemWorker().addEventListener("error", (event) => {
+    const error = new Error(`FEM worker error: ${event.message}`);
+    for (const [id, pending] of pendingFEMRequests) {
+      pending.reject(error);
+      pendingFEMRequests.delete(id);
+    }
+    femWorker = null;
+    femWorkerListenerAttached = false;
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -123,6 +155,16 @@ function ensureSimWorkerListener(): void {
 // ---------------------------------------------------------------------------
 
 export class WasmEngine implements SimulationEngine {
+  async simulateFEM(request: FEMSimulationRequest): Promise<FEMSimulationResult> {
+    ensureFEMWorkerListener();
+    const id = generateId();
+    const message: FEMWorkerMessage = { type: "fem_simulate", id, request };
+    return new Promise<FEMSimulationResult>((resolve, reject) => {
+      pendingFEMRequests.set(id, { resolve, reject });
+      getFemWorker().postMessage(message);
+    });
+  }
+
   /**
    * V1: Basic simulation (template mode, single excitation).
    *

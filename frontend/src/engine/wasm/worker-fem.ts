@@ -86,6 +86,9 @@ async function solve(request: FEMSimulationRequest): Promise<FEMSimulationResult
   if (mesh.boundaryAttributes.length === 0) {
     throw new Error("Mesh artifact does not include conforming boundary/port attributes required by the production MFEM ABI");
   }
+    if (mesh.portAttributes.length === 0) {
+      throw new Error("Mesh artifact does not include mapped positive/negative port facets required by the production MFEM ABI");
+    }
 
   const module = await (await loadFactory())({
     locateFile: (path: string) => path.endsWith(".wasm") ? `${import.meta.env.BASE_URL}wasm/mfem_solver.wasm` : path,

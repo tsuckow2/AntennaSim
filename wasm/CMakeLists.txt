@@ -132,6 +132,21 @@ if(TARGET mfem)
     -sEXIT_RUNTIME=0
     -O3
   )
+
+  add_executable(mfem_solver mfem_solver.cpp)
+  target_link_libraries(mfem_solver PRIVATE mfem)
+  set_target_properties(mfem_solver PROPERTIES SUFFIX ".js")
+  target_link_options(mfem_solver PRIVATE
+    -sEXPORT_NAME=createMfemSolver
+    -sMODULARIZE=1
+    -sALLOW_MEMORY_GROWTH=1
+    -sINITIAL_MEMORY=33554432
+    -sEXPORTED_FUNCTIONS=_mfem_solver_alloc,_mfem_solver_free,_mfem_solver_set_cancelled,_mfem_solver_run
+    -sEXPORTED_RUNTIME_METHODS=HEAPU8
+    -sENVIRONMENT=web,worker
+    -sEXIT_RUNTIME=0
+    -O3
+  )
 else()
   message(FATAL_ERROR "MFEM dependency did not provide the mfem target")
 endif()

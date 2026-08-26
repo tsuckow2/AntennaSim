@@ -48,6 +48,9 @@ export function buildFEMMesh(ir: ModelIR, meshSizeM: number): FEMMeshArtifact {
   if (ir.entities.some((entity) => entity.kind === "sheetRect")) {
     throw new Error("Volume FEM does not support sheetRect; use finite-thickness box entities");
   }
+  if (ir.boundaries.length === 0) {
+    throw new Error("missing_air_domain: a radiation or PML boundary with padding_m is required for volume FEM");
+  }
   const boxes = ir.entities.filter((entity): entity is BoxEntity => entity.kind === "box");
   if (boxes.length === 0) throw new Error("Volume FEM requires at least one box entity");
   const boxBounds = boxes.map(bounds);

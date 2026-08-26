@@ -5,6 +5,10 @@ import type { FrequencyResult } from "../api/nec";
 
 export type FEMPointStatus = "ok" | "non_finite" | "solver_error" | "cancelled" | "timeout";
 
+export const MFEM_PRODUCTION_AVAILABLE = false;
+export const MFEM_PRODUCTION_UNAVAILABLE_MESSAGE =
+  "Production MFEM solver is not available yet; use Run MFEM Smoke to validate the WASM build.";
+
 export interface FEMGainPoint {
   frequency_mhz: number;
   point_status: FEMPointStatus;

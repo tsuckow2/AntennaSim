@@ -113,6 +113,7 @@ export function packMfemPointRequest(payload: MfemPointRequest): Uint8Array {
   ensureMul(portPosBytes.byteLength, 4, "port_pos_facets");
   ensureMul(portNegBytes.byteLength, 4, "port_neg_facets");
   ensureMul(portAttrBytes.byteLength, 4, "port_attr");
+  ensureMul(materialTableBytes.byteLength, 40, "material_table");
 
   const vertexCount = payload.vertices.length / 3;
   const tetCount = payload.tets.length / 4;
@@ -123,6 +124,9 @@ export function packMfemPointRequest(payload: MfemPointRequest): Uint8Array {
   if (payload.tetRegion.length !== tetCount) throw new Error("tet_region length must equal tet_count");
   if (payload.boundaryAttr.length !== boundaryFacetCount) throw new Error("boundary_attr length must equal boundary_facet_count");
   if (payload.portAttr.length !== portFacetCount) throw new Error("port_attr length must equal total port facet count");
+  if (boundaryFacetCount === 0) throw new Error("boundary_facets must contain the explicit airbox boundary");
+  if (portPosCount === 0 || portNegCount === 0) throw new Error("port facet sets must contain positive and negative facets");
+  if (materialTableBytes.byteLength === 0) throw new Error("material_table must contain at least one material record");
 
   const totalBytes = MFEM_REQUEST_HEADER_BYTES
     + verticesBytes.byteLength

@@ -341,7 +341,6 @@ increment `abi_version` and `mesh_artifact_version` and update migration tests.
   - `mfemProductionAvailable` unlocks production `Run FEM`.
   - UI must show explicit reason when production capability is false.
 
-
 ## Scope and Physical Honesty
 
 ### Production gating rule
@@ -537,7 +536,12 @@ interface FEMSimulationResult {
     s11_imag: number | null;
     s11_db: number | null;
     swr: number | null;
-    point_status: "ok" | "non_finite" | "solver_error" | "cancelled" | "timeout";
+    point_status:
+      | "ok"
+      | "non_finite"
+      | "solver_error"
+      | "cancelled"
+      | "timeout";
     point_message?: string;
   }>;
   resonant_frequency_mhz: number | null;

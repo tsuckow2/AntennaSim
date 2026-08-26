@@ -10,12 +10,24 @@ import { create } from "zustand";
 import type { ScriptExecution } from "../dsl/executor";
 import { runParametricScript } from "../dsl/run-in-worker";
 import { getEngine } from "../engine";
-import { FEMRunAbortedError, validateFEMSweep, type FEMSimulationRequest, type FEMSimulationResult } from "../engine/fem";
+import {
+  FEMRunAbortedError,
+  MFEM_PRODUCTION_AVAILABLE,
+  MFEM_PRODUCTION_UNAVAILABLE_MESSAGE,
+  validateFEMSweep,
+  type FEMSimulationRequest,
+  type FEMSimulationResult,
+} from "../engine/fem";
 import type { ModelIR } from "../dsl/model-ir";
 import PATCH_SRC from "../dsl/examples/patch_918_petg.js?raw";
 
 export type DslRunStatus = "idle" | "running" | "success" | "error";
-export type FemRunStatus = "idle" | "running" | "success" | "error" | "cancelled";
+export type FemRunStatus =
+  | "idle"
+  | "running"
+  | "success"
+  | "error"
+  | "cancelled";
 
 interface DslState {
   /** Current script source */
@@ -57,7 +69,17 @@ export const useDslStore = create<DslState>((set, get) => ({
   femRequestToken: 0,
 
   setScript: (script) =>
-    set((state) => ({ script, paramValues: {}, result: null, status: "idle", runError: null, femStatus: state.femStatus === "running" || state.femResult ? "cancelled" : "idle", femError: null, femRequestToken: state.femRequestToken + 1 })),
+    set((state) => ({
+      script,
+      paramValues: {},
+      result: null,
+      status: "idle",
+      runError: null,
+      femStatus:
+        state.femStatus === "running" || state.femResult ? "cancelled" : "idle",
+      femError: null,
+      femRequestToken: state.femRequestToken + 1,
+    })),
 
   setParamValue: (key, value) =>
     set((s) => ({ paramValues: { ...s.paramValues, [key]: value } })),
@@ -91,31 +113,53 @@ export const useDslStore = create<DslState>((set, get) => ({
         ...(populated ? { paramValues: updated } : {}),
       });
     } catch (err) {
-      set({ status: "error", runError: err instanceof Error ? err.message : String(err) });
+      set({
+        status: "error",
+        runError: err instanceof Error ? err.message : String(err),
+      });
     }
   },
   runFEM: async (options) => {
     const state = get();
     const modelIR = state.result?.ir;
-    if (!modelIR) { set({ femStatus: "error", femError: "Run the script successfully before starting FEM" }); return; }
+    if (!modelIR) {
+      set({
+        femStatus: "error",
+        femError: "Run the script successfully before starting FEM",
+      });
+      return;
+    }
     try {
       validateFEMSweep(options.start_mhz, options.stop_mhz, options.steps);
       if (!Number.isFinite(options.mesh_size_m) || options.mesh_size_m <= 0) {
         throw new Error("FEM mesh size must be a positive finite value");
       }
-      if (!Number.isFinite(options.reference_impedance_ohms) || options.reference_impedance_ohms <= 0) {
-        throw new Error("FEM reference impedance must be a positive finite value");
+      if (
+        !Number.isFinite(options.reference_impedance_ohms) ||
+        options.reference_impedance_ohms <= 0
+      ) {
+        throw new Error(
+          "FEM reference impedance must be a positive finite value",
+        );
       }
     } catch (error) {
-      set({ femStatus: "error", femError: error instanceof Error ? error.message : String(error) });
+      set({
+        femStatus: "error",
+        femError: error instanceof Error ? error.message : String(error),
+      });
       return;
     }
     const token = state.femRequestToken + 1;
     set({ femStatus: "running", femError: null, femRequestToken: token });
     try {
       const engine = getEngine();
-      if (!engine.simulateFEM) throw new Error("FEM is available only in the browser WASM engine");
-      const result = await engine.simulateFEM({ ...options, model_ir: modelIR as ModelIR });
+      if (!engine.simulateFEM)
+        throw new Error("FEM is available only in the browser WASM engine");
+      if (!MFEM_PRODUCTION_AVAILABLE) throw new Error(MFEM_PRODUCTION_UNAVAILABLE_MESSAGE);
+      const result = await engine.simulateFEM({
+        ...options,
+        model_ir: modelIR as ModelIR,
+      });
       if (get().femRequestToken !== token) return;
       set({ femStatus: "success", femResult: result, femError: null });
     } catch (error) {
@@ -128,7 +172,10 @@ export const useDslStore = create<DslState>((set, get) => ({
         });
         return;
       }
-      set({ femStatus: "error", femError: error instanceof Error ? error.message : String(error) });
+      set({
+        femStatus: "error",
+        femError: error instanceof Error ? error.message : String(error),
+      });
     }
   },
   cancelFEM: () => {

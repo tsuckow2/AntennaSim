@@ -10,6 +10,7 @@ Goal: Implement the revised MFEM-WASM plan so browser FEM runs produce validated
 - [ ] Add a TypeScript ABI pack/unpack layer with strict byte-length and offset validation.
 
 Acceptance:
+
 - Build produces loadable production solver artifact.
 - ABI validation rejects malformed requests and reports structured status codes.
 
@@ -22,6 +23,7 @@ Acceptance:
 - [ ] Persist per-point `cancelled`/`timeout` status before rejecting aggregate run.
 
 Acceptance:
+
 - Production requests cannot hit smoke-only code.
 - Stale worker messages are ignored.
 
@@ -34,6 +36,7 @@ Acceptance:
 - [ ] Emit `port_attr` payload aligned with facet ownership.
 
 Acceptance:
+
 - 918 MHz model yields deterministic artifact with air/material/boundary/port attributes.
 - Invalid geometries/ports fail before solver invocation.
 
@@ -49,6 +52,7 @@ Acceptance:
 - [ ] Return structured per-point outputs (`Zin`, complex `S11`, timings, residual, status).
 
 Acceptance:
+
 - Per-point residual and convergence satisfy documented tolerances.
 - Port convention produces reproducible sign and impedance.
 
@@ -60,6 +64,7 @@ Acceptance:
 - [ ] Keep/reference exact `reference_impedance_ohms` in each result.
 
 Acceptance:
+
 - JSON round-trip preserves invalid-point semantics.
 - SWR and Smith rendering remain stable with sparse/invalid points.
 
@@ -73,6 +78,7 @@ Acceptance:
 - [ ] Add feature-ready contract for future far-field payload (`gain_dbi[]`, angles/frequency index).
 
 Acceptance:
+
 - Gain panel renders correctly without crashing in disabled and enabled states.
 - No fabricated gain values are displayed.
 
@@ -86,6 +92,7 @@ Acceptance:
 - [ ] Add static deployment smoke test via `docker-compose.wasm.yml`.
 
 Acceptance:
+
 - Benchmarks pass with documented tolerances.
 - Browser-only deployment runs without backend.
 

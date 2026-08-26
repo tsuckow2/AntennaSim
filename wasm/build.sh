@@ -75,8 +75,8 @@ emmake make -j$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)
 # Copy browser artifacts to the Vite public directory when building in-repo.
 if [ -d "../../frontend/public/wasm" ]; then
     cp nec2c.js nec2c.wasm fem1d.js fem1d.wasm ../../frontend/public/wasm/
-    if [ -f mfem_smoke.js ] && [ -f mfem_smoke.wasm ]; then
-        cp mfem_smoke.js mfem_smoke.wasm ../../frontend/public/wasm/
+    if [ -f mfem_smoke.js ] && [ -f mfem_smoke.wasm ] && [ -f mfem_solver.js ] && [ -f mfem_solver.wasm ]; then
+        cp mfem_smoke.js mfem_smoke.wasm mfem_solver.js mfem_solver.wasm ../../frontend/public/wasm/
     fi
 fi
 
@@ -85,6 +85,7 @@ echo "Build complete!"
 echo "  NEC2C JS loader:  $(pwd)/nec2c.js"
 echo "  FEM JS loader:    $(pwd)/fem1d.js"
 echo "  WASM binaries:    $(pwd)/nec2c.wasm $(pwd)/fem1d.wasm"
-echo "  MFEM JS loader:   $(pwd)/mfem_smoke.js"
-echo "  MFEM WASM binary: $(pwd)/mfem_smoke.wasm"
-ls -lh nec2c.js nec2c.wasm fem1d.js fem1d.wasm mfem_smoke.js mfem_smoke.wasm 2>/dev/null || echo "(files not found — check build output above)"
+echo "  MFEM smoke loader:  $(pwd)/mfem_smoke.js"
+echo "  MFEM solver loader: $(pwd)/mfem_solver.js"
+echo "  MFEM WASM binaries: $(pwd)/mfem_smoke.wasm $(pwd)/mfem_solver.wasm"
+ls -lh nec2c.js nec2c.wasm fem1d.js fem1d.wasm mfem_smoke.js mfem_smoke.wasm mfem_solver.js mfem_solver.wasm 2>/dev/null || echo "(files not found — check build output above)"

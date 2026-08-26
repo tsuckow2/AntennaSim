@@ -127,6 +127,24 @@ mesher or solver.
 - Produce input impedance, S11, resonant frequency, and optional field slices.
 - Keep the interface compatible with local workers and a future remote solver.
 
+### Phase 5a: MFEM-WASM feasibility (in progress)
+
+- Use MFEM v4.8 as the finite-element core instead of expanding the temporary
+  hand-written `fem1d` solver.
+- Build MFEM as a single-process Emscripten module with MPI, HYPRE, METIS,
+  SuiteSparse, OpenMP, and other optional native dependencies disabled.
+- Compile a browser worker-compatible H(curl) smoke target that creates a
+  tetrahedral mesh, constructs first-order Nedelec elements, and assembles a
+  curl-curl plus mass bilinear form.
+- Load MFEM through CPM.cmake at a pinned `v4.8` tag, using a reusable
+  `CPM_SOURCE_CACHE`; keep the dependency source outside the repository.
+- Allow `MFEM_SOURCE_DIR` as a local/offline override for patched or pre-fetched
+  MFEM sources.
+- Do not expose SWR, gain, or physical impedance as production results until
+  the port excitation and field postprocessing are validated.
+- Replace `fem1d` with the MFEM solver only after the feasibility target runs
+  in the browser and a canonical benchmark is available.
+
 ### Phase 6: 918 MHz templates
 
 - Add `patch_918_petg.js` with documented parameters and defaults.
@@ -163,7 +181,9 @@ mesher or solver.
   schema-driven form renders, parameters update the IR in real time, and
   the 3D ModelIR preview is visible.
 - **M3:** A script compiles to valid ModelIR and a mesh preview.
-- **M4:** A scripted model produces an end-to-end frequency sweep and S11 plot.
+- **M4:** A scripted model produces an end-to-end frequency sweep and S11 plot
+  using a validated MFEM H(curl) solver; the current `fem1d` WASM target is
+  only a temporary integration smoke test.
 - **M5:** A 918 MHz template can be swept and reports the best result.
 
 ## Initial implementation issues and dependency order
@@ -181,8 +201,9 @@ mesher or solver.
 10. Define ModelIR v1 and its serializer.
 11. Add IR validation for topology, materials, references, and ports.
 12. Implement IR-to-Gmsh conversion and mesh diagnostics.
-13. Integrate the solver client for frequency sweeps and S11 plots.
-14. Add the documented `patch_918_petg.js` example.
+13. Prove the MFEM-WASM H(curl) feasibility target on a tetrahedral benchmark.
+14. Integrate the MFEM solver client for frequency sweeps and validated S11.
+15. Add the documented `patch_918_petg.js` example.
 
 The sequence is the default blocking order. Work may overlap when an interface
 is stable, but later work must not bypass validation or silently couple the
@@ -209,7 +230,11 @@ examples/              918 MHz parametric antenna scripts
   against the user-defined schema.
 - Keep ModelIR solver-neutral so future script, GUI, or CAD frontends can share
   the FEM pipeline.
-- Start with Gmsh and a direct sparse solve for small models; add iterative
-  methods and PML after the baseline is validated.
+- Start with Gmsh and MFEM first-order edge elements for small models; use a
+  real block-complex formulation or MFEM complex operators for frequency
+  domain assembly, then add iterative methods and PML after the baseline is
+  validated.
+- Keep the hand-written `fem1d` implementation as a temporary browser ABI and
+  numerical smoke test only; it is not a physical antenna solver.
 - Treat PETG properties as uncertain defaults and prefer user-calibrated
   values, since print settings can change effective dielectric behavior.

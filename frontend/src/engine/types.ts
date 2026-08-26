@@ -211,4 +211,5 @@ export interface SimulationEngine {
 
   /** Run the browser-only FEM solver when supported by the selected engine. */
   simulateFEM?(request: FEMSimulationRequest): Promise<FEMSimulationResult>;
+  cancelFEM?(): void;
 }

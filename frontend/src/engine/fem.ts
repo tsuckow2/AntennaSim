@@ -1,13 +1,35 @@
 import type { ModelIR } from "../dsl/model-ir";
 import { validateModelIR } from "../dsl/model-ir";
+import type { FEMMeshArtifact } from "./mesh";
+import type { FrequencyResult } from "../api/nec";
+
+export type FEMPointStatus = "ok" | "non_finite" | "solver_error" | "cancelled" | "timeout";
+
+export interface FEMGainPoint {
+  frequency_mhz: number;
+  point_status: FEMPointStatus;
+  point_message?: string;
+  gain_dbi: number | null;
+  theta_deg: number | null;
+  phi_deg: number | null;
+}
+
+export interface FEMGainData {
+  available: boolean;
+  message?: string;
+  points?: FEMGainPoint[];
+}
 
 export interface FEMFrequencyPoint {
   frequency_mhz: number;
-  impedance_real_ohms: number;
-  impedance_imag_ohms: number;
-  s11_real: number;
-  s11_imag: number;
-  s11_db: number;
+  point_status: FEMPointStatus;
+  point_message?: string;
+  impedance_real_ohms: number | null;
+  impedance_imag_ohms: number | null;
+  s11_real: number | null;
+  s11_imag: number | null;
+  s11_db: number | null;
+  swr: number | null;
 }
 
 export interface FEMSimulationRequest {
@@ -22,12 +44,232 @@ export interface FEMSimulationRequest {
 
 export interface FEMSimulationResult {
   simulation_id: string;
-  engine: "wasm-fem1d";
+  engine: "mfem-wasm";
   computed_in_ms: number;
-  mesh: { elements: number; nodes: number; length_m: number; warnings: string[] };
+  mesh: FEMMeshArtifact["statistics"] & { warnings: string[] };
+  reference_impedance_ohms: number;
   frequency_data: FEMFrequencyPoint[];
   resonant_frequency_mhz: number | null;
   warnings: string[];
+  gain_data?: FEMGainData;
+  capabilities: {
+    impedance: boolean;
+    s11: boolean;
+    swr: boolean;
+    smith_chart: boolean;
+    near_field: boolean;
+    far_field: boolean;
+    gain: boolean;
+    port_status: boolean;
+    mesh_status: boolean;
+  };
+  port_status?: {
+    port_id: string;
+    positive: [number, number, number];
+    negative: [number, number, number];
+    status: "ok" | "error" | "missing";
+    message?: string;
+  }[];
+  mesh_status?: {
+    status: "ok" | "error" | "missing";
+    message?: string;
+  };
+}
+
+export class FEMRunAbortedError extends Error {
+  kind: "cancelled" | "timeout";
+  partialResult: FEMSimulationResult;
+
+  constructor(kind: "cancelled" | "timeout", message: string, partialResult: FEMSimulationResult) {
+    super(message);
+    this.name = "FEMRunAbortedError";
+    this.kind = kind;
+    this.partialResult = partialResult;
+  }
+}
+
+function finiteOrNull(value: number | null | undefined): number | null {
+  return value != null && Number.isFinite(value) ? value : null;
+}
+
+function deriveS11Db(s11Real: number, s11Imag: number): number | null {
+  const magnitude = Math.hypot(s11Real, s11Imag);
+  if (!Number.isFinite(magnitude) || magnitude <= 0) return null;
+  const db = 20 * Math.log10(magnitude);
+  return Number.isFinite(db) ? db : null;
+}
+
+export function computeFEMSWR(s11Real: number, s11Imag: number): number | null {
+  const magnitude = Math.hypot(s11Real, s11Imag);
+  if (!Number.isFinite(magnitude) || magnitude >= 1) return null;
+  return (1 + magnitude) / (1 - magnitude);
+}
+
+export function adaptFEMFrequencyData(
+  points: FEMFrequencyPoint[],
+): FEMFrequencyPoint[] {
+  return points.map((point) => {
+    const pointStatus = point.point_status;
+    const re = finiteOrNull(point.impedance_real_ohms);
+    const im = finiteOrNull(point.impedance_imag_ohms);
+    const s11Real = finiteOrNull(point.s11_real);
+    const s11Imag = finiteOrNull(point.s11_imag);
+    const invalid = pointStatus === "ok" && (re == null || im == null || s11Real == null || s11Imag == null);
+    if (pointStatus !== "ok" || invalid) {
+      return {
+        ...point,
+        point_status: pointStatus === "ok" ? "non_finite" : pointStatus,
+        impedance_real_ohms: null,
+        impedance_imag_ohms: null,
+        s11_real: null,
+        s11_imag: null,
+        s11_db: null,
+        swr: null,
+      };
+    }
+    const safeS11Real = s11Real as number;
+    const safeS11Imag = s11Imag as number;
+    return {
+      ...point,
+      impedance_real_ohms: re,
+      impedance_imag_ohms: im,
+      s11_real: safeS11Real,
+      s11_imag: safeS11Imag,
+      s11_db: point.s11_db ?? deriveS11Db(safeS11Real, safeS11Imag),
+      swr: computeFEMSWR(safeS11Real, safeS11Imag),
+    };
+  });
+}
+
+export function toNECFrequencyResults(result: FEMSimulationResult): FrequencyResult[] {
+  return result.frequency_data.flatMap((point) => {
+    if (
+      point.point_status !== "ok"
+      || point.impedance_real_ohms == null
+      || point.impedance_imag_ohms == null
+      || point.s11_real == null
+      || point.s11_imag == null
+      || point.swr == null
+    ) {
+      return [];
+    }
+    return [{
+    frequency_mhz: point.frequency_mhz,
+    impedance: { real: point.impedance_real_ohms, imag: point.impedance_imag_ohms },
+    swr_50: point.swr,
+    gain_max_dbi: Number.NaN,
+    gain_max_theta: 0,
+    gain_max_phi: 0,
+    front_to_back_db: null,
+    beamwidth_e_deg: null,
+    beamwidth_h_deg: null,
+    efficiency_percent: null,
+    pattern: null,
+    currents: null,
+  }];
+  });
+}
+
+export function validateFEMSweep(startMhz: number, stopMhz: number, steps: number): void {
+  if (![startMhz, stopMhz, steps].every(Number.isFinite)) throw new Error("FEM sweep values must be finite");
+  if (startMhz <= 0 || stopMhz < startMhz) throw new Error("FEM sweep must have positive, ascending frequencies");
+  if (!Number.isInteger(steps) || steps < 1 || steps > 201) throw new Error("FEM UI sweeps must contain between 1 and 201 points");
+}
+
+export const MFEM_CAPABILITIES: FEMSimulationResult["capabilities"] = {
+  impedance: true,
+  s11: true,
+  swr: true,
+  smith_chart: true,
+  near_field: false,
+  far_field: false,
+  gain: false,
+  port_status: true,
+  mesh_status: true,
+};
+
+export function buildFEMFrequencies(startMhz: number, stopMhz: number, steps: number): number[] {
+  validateFEMSweep(startMhz, stopMhz, steps);
+  if (steps === 1) return [startMhz];
+  const out: number[] = [];
+  const span = stopMhz - startMhz;
+  for (let index = 0; index < steps; index += 1) {
+    out.push(startMhz + (span * index) / (steps - 1));
+  }
+  return out;
+}
+
+export function createStatusOnlyFEMResult(
+  request: FEMSimulationRequest,
+  status: "cancelled" | "timeout",
+  message: string,
+): FEMSimulationResult {
+  const frequency_data = adaptFEMFrequencyData(
+    buildFEMFrequencies(request.start_mhz, request.stop_mhz, request.steps).map((frequency_mhz) => ({
+      frequency_mhz,
+      point_status: status,
+      point_message: message,
+      impedance_real_ohms: null,
+      impedance_imag_ohms: null,
+      s11_real: null,
+      s11_imag: null,
+      s11_db: null,
+      swr: null,
+    })),
+  );
+  return {
+    simulation_id: `mfem-${status}-${Date.now().toString(36)}`,
+    engine: "mfem-wasm",
+    computed_in_ms: 0,
+    mesh: {
+      nodes: 0,
+      elements: 0,
+      min_quality: 0,
+      material_count: 0,
+      boundary_count: 0,
+      warnings: [message],
+    },
+    reference_impedance_ohms: request.reference_impedance_ohms,
+    frequency_data,
+    resonant_frequency_mhz: null,
+    warnings: [message],
+    gain_data: {
+      available: false,
+      message: "Gain unavailable for this FEM run.",
+    },
+    capabilities: MFEM_CAPABILITIES,
+  };
+}
+
+export function getFEMGainAvailabilityMessage(result: FEMSimulationResult): string {
+  if (!result.capabilities.gain) return "Gain is unavailable for FEM mode until far-field outputs are validated.";
+  if (!result.gain_data?.available) return result.gain_data?.message ?? "Gain capability is enabled but no far-field payload was provided.";
+  const renderable = getRenderableFEMGainPoints(result);
+  if (renderable.length === 0) return "Gain capability is enabled, but no valid gain points are available for rendering.";
+  return "Gain data available.";
+}
+
+export function getRenderableFEMGainPoints(result: FEMSimulationResult): Array<{ frequency_mhz: number; gain_dbi: number; theta_deg: number; phi_deg: number }> {
+  if (!result.capabilities.gain || !result.gain_data?.available || !result.gain_data.points) return [];
+  return result.gain_data.points.flatMap((point) => {
+    if (
+      point.point_status !== "ok"
+      || point.gain_dbi == null
+      || point.theta_deg == null
+      || point.phi_deg == null
+      || !Number.isFinite(point.gain_dbi)
+      || !Number.isFinite(point.theta_deg)
+      || !Number.isFinite(point.phi_deg)
+    ) {
+      return [];
+    }
+    return [{
+      frequency_mhz: point.frequency_mhz,
+      gain_dbi: point.gain_dbi,
+      theta_deg: point.theta_deg,
+      phi_deg: point.phi_deg,
+    }];
+  });
 }
 
 export function selectFEMPort(request: FEMSimulationRequest): { positive: [number, number, number]; negative: [number, number, number]; id: string } {

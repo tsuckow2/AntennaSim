@@ -1,5 +1,26 @@
-cmake_minimum_required(VERSION 3.13)
+cmake_minimum_required(VERSION 3.14)
 project(nec2c-wasm C CXX)
+
+set(MFEM_VERSION "v4.8" CACHE STRING "MFEM version or Git tag used by CPM")
+set(MFEM_SOURCE_DIR "" CACHE PATH "Optional local MFEM source tree override")
+
+# Bootstrap CPM in the build tree so MFEM is fetched and cached as a normal
+# CMake dependency instead of being cloned by the shell build script.
+set(CPM_VERSION "0.40.2")
+set(CPM_DOWNLOAD_LOCATION "${CMAKE_BINARY_DIR}/cmake/CPM_${CPM_VERSION}.cmake")
+if(NOT EXISTS "${CPM_DOWNLOAD_LOCATION}")
+  file(DOWNLOAD
+    "https://github.com/cpm-cmake/CPM.cmake/releases/download/v${CPM_VERSION}/CPM.cmake"
+    "${CPM_DOWNLOAD_LOCATION}"
+    TLS_VERIFY ON
+    STATUS CPM_DOWNLOAD_STATUS
+  )
+  list(GET CPM_DOWNLOAD_STATUS 0 CPM_DOWNLOAD_CODE)
+  if(NOT CPM_DOWNLOAD_CODE EQUAL 0)
+    message(FATAL_ERROR "Unable to download CPM.cmake: ${CPM_DOWNLOAD_STATUS}")
+  endif()
+endif()
+include("${CPM_DOWNLOAD_LOCATION}")
 
 # nec2c source files (flat layout — all .c files in submodule root)
 set(NEC2C_DIR ${CMAKE_CURRENT_SOURCE_DIR}/nec2c)
@@ -67,3 +88,50 @@ target_link_options(fem1d PRIVATE
   -sEXIT_RUNTIME=0
   -O3
 )
+
+if(MFEM_SOURCE_DIR AND EXISTS "${MFEM_SOURCE_DIR}/CMakeLists.txt")
+  CPMAddPackage(NAME mfem SOURCE_DIR "${MFEM_SOURCE_DIR}")
+else()
+  set(MFEM_USE_MPI OFF CACHE BOOL "" FORCE)
+  set(MFEM_USE_OPENMP OFF CACHE BOOL "" FORCE)
+  set(MFEM_USE_LAPACK OFF CACHE BOOL "" FORCE)
+  set(MFEM_USE_HYPRE OFF CACHE BOOL "" FORCE)
+  set(MFEM_USE_METIS OFF CACHE BOOL "" FORCE)
+  set(MFEM_USE_SUITESPARSE OFF CACHE BOOL "" FORCE)
+  set(MFEM_USE_GSLIB OFF CACHE BOOL "" FORCE)
+  set(MFEM_USE_NETCDF OFF CACHE BOOL "" FORCE)
+  set(MFEM_USE_CURL OFF CACHE BOOL "" FORCE)
+  CPMAddPackage(
+    NAME mfem
+    GITHUB_REPOSITORY mfem/mfem
+    GIT_TAG "${MFEM_VERSION}"
+    OPTIONS
+      "MFEM_USE_MPI OFF"
+      "MFEM_USE_OPENMP OFF"
+      "MFEM_USE_LAPACK OFF"
+      "MFEM_USE_HYPRE OFF"
+      "MFEM_USE_METIS OFF"
+      "MFEM_USE_SUITESPARSE OFF"
+      "MFEM_USE_GSLIB OFF"
+      "MFEM_USE_NETCDF OFF"
+      "MFEM_USE_CURL OFF"
+  )
+endif()
+
+if(TARGET mfem)
+  add_executable(mfem_smoke mfem_smoke.cpp)
+  target_link_libraries(mfem_smoke PRIVATE mfem)
+  set_target_properties(mfem_smoke PROPERTIES SUFFIX ".js")
+  target_link_options(mfem_smoke PRIVATE
+    -sEXPORT_NAME=createMfemSmoke
+    -sMODULARIZE=1
+    -sALLOW_MEMORY_GROWTH=1
+    -sINITIAL_MEMORY=33554432
+    -sEXPORTED_FUNCTIONS=_mfem_hcurl_smoke
+    -sENVIRONMENT=web,worker
+    -sEXIT_RUNTIME=0
+    -O3
+  )
+else()
+  message(FATAL_ERROR "MFEM dependency did not provide the mfem target")
+endif()

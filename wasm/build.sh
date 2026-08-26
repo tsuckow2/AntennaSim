@@ -2,12 +2,14 @@
 # Build nec2c to WebAssembly using Emscripten
 #
 # Prerequisites:
-#   - Emscripten SDK installed and activated (source emsdk_env.sh)
+#   - Emscripten SDK installed (the workspace-local /workspaces/emsdk is detected)
 #   - nec2c submodule initialized (git submodule update --init)
+#   - Network access on the first build so CPM can fetch MFEM v4.8
 #
 # Output:
 #   build/nec2c.js    — JavaScript loader/glue code
 #   build/nec2c.wasm  — WebAssembly binary
+#   build/mfem_smoke.js/.wasm — MFEM H(curl) feasibility module
 #
 # Usage:
 #   cd wasm && ./build.sh
@@ -57,12 +59,25 @@ echo "Building nec2c to WebAssembly..."
 mkdir -p build
 cd build
 
-emcmake cmake .. -DCMAKE_BUILD_TYPE=Release
+CPM_SOURCE_CACHE="${CPM_SOURCE_CACHE:-$SCRIPT_DIR/build/cpm-cache}"
+CMAKE_ARGS=(
+    -DCMAKE_BUILD_TYPE=Release
+    -DMFEM_VERSION="${MFEM_VERSION:-v4.8}"
+    -DCPM_SOURCE_CACHE="$CPM_SOURCE_CACHE"
+    -DMFEM_SOURCE_DIR="${MFEM_SOURCE_DIR:-}"
+)
+if [ -n "${MFEM_SOURCE_DIR:-}" ]; then
+    CMAKE_ARGS[-1]="-DMFEM_SOURCE_DIR=$MFEM_SOURCE_DIR"
+fi
+emcmake cmake .. "${CMAKE_ARGS[@]}"
 emmake make -j$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)
 
 # Copy browser artifacts to the Vite public directory when building in-repo.
 if [ -d "../../frontend/public/wasm" ]; then
     cp nec2c.js nec2c.wasm fem1d.js fem1d.wasm ../../frontend/public/wasm/
+    if [ -f mfem_smoke.js ] && [ -f mfem_smoke.wasm ]; then
+        cp mfem_smoke.js mfem_smoke.wasm ../../frontend/public/wasm/
+    fi
 fi
 
 echo ""
@@ -70,4 +85,6 @@ echo "Build complete!"
 echo "  NEC2C JS loader:  $(pwd)/nec2c.js"
 echo "  FEM JS loader:    $(pwd)/fem1d.js"
 echo "  WASM binaries:    $(pwd)/nec2c.wasm $(pwd)/fem1d.wasm"
-ls -lh nec2c.js nec2c.wasm fem1d.js fem1d.wasm 2>/dev/null || echo "(files not found — check build output above)"
+echo "  MFEM JS loader:   $(pwd)/mfem_smoke.js"
+echo "  MFEM WASM binary: $(pwd)/mfem_smoke.wasm"
+ls -lh nec2c.js nec2c.wasm fem1d.js fem1d.wasm mfem_smoke.js mfem_smoke.wasm 2>/dev/null || echo "(files not found — check build output above)"

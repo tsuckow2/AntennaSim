@@ -24,8 +24,9 @@ import { parseNecFile } from "../parsers/nec-file";
 import { parseMaa } from "../parsers/maa-import";
 import { exportMaa } from "../parsers/maa-export";
 import { buildCardDeck } from "../parsers/nec-input";
-import type { FEMSimulationRequest, FEMSimulationResult } from "../fem";
+import { FEMRunAbortedError, createStatusOnlyFEMResult, type FEMSimulationRequest, type FEMSimulationResult } from "../fem";
 import type { FEMWorkerMessage, FEMWorkerResponse } from "./worker-fem";
+import type { MfemSmokeRequest, MfemSmokeResponse } from "./worker-mfem";
 import type {
   WorkerRequest,
   WorkerResponse,
@@ -39,6 +40,8 @@ import {
   assertSupportedFrequencyRange,
 } from "../limits";
 
+const MFEM_PER_POINT_TIMEOUT_MS = 30000;
+
 // ---------------------------------------------------------------------------
 // Worker pool (single worker per type, lazy-initialized)
 // ---------------------------------------------------------------------------
@@ -46,6 +49,8 @@ import {
 let simWorker: Worker | null = null;
 let optWorker: Worker | null = null;
 let femWorker: Worker | null = null;
+let mfemWorker: Worker | null = null;
+let femWorkerGeneration = 0;
 
 function getSimWorker(): Worker {
   if (!simWorker) {
@@ -68,8 +73,23 @@ function getOptWorker(): Worker {
 }
 
 function getFemWorker(): Worker {
-  if (!femWorker) femWorker = new Worker(new URL("./worker-fem.ts", import.meta.url), { type: "module" });
+  if (!femWorker) {
+    femWorker = new Worker(new URL("./worker-fem.ts", import.meta.url), { type: "module" });
+    femWorkerGeneration += 1;
+  }
   return femWorker;
+}
+
+function resetFemWorker(): void {
+  femWorker?.terminate();
+  femWorker = null;
+  femWorkerListenerAttached = false;
+  getFemWorker();
+}
+
+function getMfemWorker(): Worker {
+  if (!mfemWorker) mfemWorker = new Worker(new URL("./worker-mfem.ts", import.meta.url), { type: "module" });
+  return mfemWorker;
 }
 
 // ---------------------------------------------------------------------------
@@ -89,15 +109,25 @@ function generateId(): string {
   return `req-${++nextRequestId}-${Date.now().toString(36)}`;
 }
 
-const pendingFEMRequests = new Map<string, { resolve: (result: FEMSimulationResult) => void; reject: (error: Error) => void }>();
+const pendingFEMRequests = new Map<string, {
+  generation: number;
+  request: FEMSimulationRequest;
+  resolve: (result: FEMSimulationResult) => void;
+  reject: (error: Error) => void;
+  timeoutId: ReturnType<typeof setTimeout>;
+}>();
 let femWorkerListenerAttached = false;
+const pendingMfemSmokeRequests = new Map<string, { resolve: (trueDofs: number) => void; reject: (error: Error) => void }>();
+let mfemWorkerListenerAttached = false;
 
 function ensureFEMWorkerListener(): void {
   if (femWorkerListenerAttached) return;
   femWorkerListenerAttached = true;
   getFemWorker().addEventListener("message", (event: MessageEvent<FEMWorkerResponse>) => {
+    if (event.data.generation !== femWorkerGeneration) return;
     const pending = pendingFEMRequests.get(event.data.id);
     if (!pending) return;
+    clearTimeout(pending.timeoutId);
     pendingFEMRequests.delete(event.data.id);
     if (event.data.type === "success") pending.resolve(event.data.result);
     else pending.reject(new Error(event.data.message));
@@ -105,11 +135,37 @@ function ensureFEMWorkerListener(): void {
   getFemWorker().addEventListener("error", (event) => {
     const error = new Error(`FEM worker error: ${event.message}`);
     for (const [id, pending] of pendingFEMRequests) {
+      clearTimeout(pending.timeoutId);
       pending.reject(error);
       pendingFEMRequests.delete(id);
     }
-    femWorker = null;
-    femWorkerListenerAttached = false;
+    resetFemWorker();
+  });
+}
+
+function rejectPendingFemRequestsAsAborted(kind: "cancelled" | "timeout", message: string): void {
+  for (const [id, pending] of pendingFEMRequests) {
+    clearTimeout(pending.timeoutId);
+    pending.reject(new FEMRunAbortedError(kind, message, createStatusOnlyFEMResult(pending.request, kind, message)));
+    pendingFEMRequests.delete(id);
+  }
+}
+
+function ensureMfemWorkerListener(): void {
+  if (mfemWorkerListenerAttached) return;
+  mfemWorkerListenerAttached = true;
+  getMfemWorker().addEventListener("message", (event: MessageEvent<MfemSmokeResponse>) => {
+    const pending = pendingMfemSmokeRequests.get(event.data.id);
+    if (!pending) return;
+    pendingMfemSmokeRequests.delete(event.data.id);
+    if (event.data.type === "success") pending.resolve(event.data.trueDofs);
+    else pending.reject(new Error(event.data.message));
+  });
+  getMfemWorker().addEventListener("error", (event) => {
+    const error = new Error(`MFEM worker error: ${event.message}`);
+    for (const [id, pending] of pendingMfemSmokeRequests) { pending.reject(error); pendingMfemSmokeRequests.delete(id); }
+    mfemWorker = null;
+    mfemWorkerListenerAttached = false;
   });
 }
 
@@ -155,12 +211,35 @@ function ensureSimWorkerListener(): void {
 // ---------------------------------------------------------------------------
 
 export class WasmEngine implements SimulationEngine {
+  cancelFEM(): void {
+    rejectPendingFemRequestsAsAborted("cancelled", "FEM run cancelled");
+    resetFemWorker();
+  }
+
+  runMfemSmoke(): Promise<number> {
+    ensureMfemWorkerListener();
+    const id = generateId();
+    const message: MfemSmokeRequest = { type: "mfem_smoke", id };
+    return new Promise<number>((resolve, reject) => {
+      pendingMfemSmokeRequests.set(id, { resolve, reject });
+      getMfemWorker().postMessage(message);
+    });
+  }
+
   async simulateFEM(request: FEMSimulationRequest): Promise<FEMSimulationResult> {
     ensureFEMWorkerListener();
     const id = generateId();
-    const message: FEMWorkerMessage = { type: "fem_simulate", id, request };
+    const generation = femWorkerGeneration;
+    const timeoutMs = Math.max(MFEM_PER_POINT_TIMEOUT_MS, request.steps * MFEM_PER_POINT_TIMEOUT_MS);
+    const message: FEMWorkerMessage = { type: "fem_simulate", id, generation, request };
     return new Promise<FEMSimulationResult>((resolve, reject) => {
-      pendingFEMRequests.set(id, { resolve, reject });
+      const timeoutId = setTimeout(() => {
+        const pending = pendingFEMRequests.get(id);
+        if (!pending || pending.generation !== generation) return;
+        rejectPendingFemRequestsAsAborted("timeout", `FEM run timed out after ${timeoutMs} ms`);
+        resetFemWorker();
+      }, timeoutMs);
+      pendingFEMRequests.set(id, { generation, request, resolve, reject, timeoutId });
       getFemWorker().postMessage(message);
     });
   }

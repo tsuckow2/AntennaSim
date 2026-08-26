@@ -1,5 +1,16 @@
 import { describe, expect, it } from "vitest";
-import { selectFEMPort } from "../fem";
+import {
+  adaptFEMFrequencyData,
+  buildFEMFrequencies,
+  computeFEMSWR,
+  createStatusOnlyFEMResult,
+  getFEMGainAvailabilityMessage,
+  getRenderableFEMGainPoints,
+  MFEM_CAPABILITIES,
+  selectFEMPort,
+  toNECFrequencyResults,
+  validateFEMSweep,
+} from "../fem";
 import type { FEMSimulationRequest } from "../fem";
 
 const request: FEMSimulationRequest = {
@@ -33,4 +44,105 @@ describe("browser FEM contract", () => {
       },
     })).toThrow(/entities.*material/);
   });
+
+  it("derives SWR from S11 and handles an invalid magnitude explicitly", () => {
+    expect(computeFEMSWR(0, 0)).toBe(1);
+    expect(computeFEMSWR(0.5, 0)).toBeCloseTo(3);
+    expect(computeFEMSWR(1, 0)).toBeNull();
+    expect(adaptFEMFrequencyData([{ ...requestPoint }])[0]!.swr).toBe(1);
+  });
+
+  it("maps invalid wire numbers to point_status=non_finite with null payloads", () => {
+    const mapped = adaptFEMFrequencyData([{
+      ...requestPoint,
+      point_status: "ok",
+      s11_real: Number.NaN,
+      s11_imag: 0,
+    }]);
+    expect(mapped[0]!.point_status).toBe("non_finite");
+    expect(mapped[0]!.s11_real).toBeNull();
+    expect(mapped[0]!.swr).toBeNull();
+  });
+
+  it("skips invalid FEM points when adapting chart inputs and never fabricates gain", () => {
+    const frequency_data = adaptFEMFrequencyData([
+      { ...requestPoint, point_status: "ok" },
+      {
+        ...requestPoint,
+        frequency_mhz: 919,
+        point_status: "solver_error",
+        impedance_real_ohms: null,
+        impedance_imag_ohms: null,
+        s11_real: null,
+        s11_imag: null,
+        s11_db: null,
+        swr: null,
+      },
+    ]);
+    const chartData = toNECFrequencyResults({
+      simulation_id: "sim",
+      engine: "mfem-wasm",
+      computed_in_ms: 1,
+      mesh: { nodes: 1, elements: 1, min_quality: 1, material_count: 1, boundary_count: 0, warnings: [] },
+      reference_impedance_ohms: 50,
+      frequency_data,
+      resonant_frequency_mhz: 918,
+      warnings: [],
+      capabilities: MFEM_CAPABILITIES,
+    });
+    expect(chartData).toHaveLength(1);
+    expect(Number.isNaN(chartData[0]!.gain_max_dbi)).toBe(true);
+  });
+
+  it("creates cancellation and timeout status-only results without NaN/Infinity on the wire", () => {
+    const cancelled = createStatusOnlyFEMResult(request, "cancelled", "cancelled by user");
+    const timedOut = createStatusOnlyFEMResult(request, "timeout", "timed out");
+    expect(cancelled.frequency_data.every((point) => point.point_status === "cancelled")).toBe(true);
+    expect(timedOut.frequency_data.every((point) => point.point_status === "timeout")).toBe(true);
+    expect(JSON.stringify(cancelled)).not.toContain("Infinity");
+    expect(JSON.stringify(cancelled)).not.toContain("NaN");
+  });
+
+  it("keeps gain rendering capability-gated and supports enabled payloads", () => {
+    const disabled = createStatusOnlyFEMResult(request, "cancelled", "cancelled by user");
+    expect(getFEMGainAvailabilityMessage(disabled)).toMatch(/unavailable/i);
+    expect(getRenderableFEMGainPoints(disabled)).toHaveLength(0);
+
+    const enabled = {
+      ...disabled,
+      capabilities: { ...disabled.capabilities, gain: true },
+      gain_data: {
+        available: true,
+        points: [
+          {
+            frequency_mhz: 918,
+            point_status: "ok" as const,
+            gain_dbi: 5.2,
+            theta_deg: 15,
+            phi_deg: 90,
+          },
+        ],
+      },
+    };
+    expect(getFEMGainAvailabilityMessage(enabled)).toMatch(/available/i);
+    expect(getRenderableFEMGainPoints(enabled)).toHaveLength(1);
+  });
+
+  it("keeps the first UI sweep bounded and capabilities honest", () => {
+    expect(() => validateFEMSweep(900, 936, 202)).toThrow(/201/);
+    expect(buildFEMFrequencies(900, 936, 5)).toHaveLength(5);
+    expect(MFEM_CAPABILITIES.gain).toBe(false);
+    expect(MFEM_CAPABILITIES.far_field).toBe(false);
+  });
 });
+
+const requestPoint = {
+  frequency_mhz: 918,
+  point_status: "ok" as const,
+  impedance_real_ohms: 50,
+  impedance_imag_ohms: 0,
+  s11_real: 0,
+  s11_imag: 0,
+  s11_db: null,
+  swr: null,
+};

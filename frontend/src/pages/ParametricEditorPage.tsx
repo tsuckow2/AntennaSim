@@ -14,6 +14,7 @@ import { ErrorBoundary } from "../components/common/ErrorBoundary";
 import { ScriptEditorPanel } from "../components/dsl/ScriptEditorPanel";
 import { ParamSchemaForm } from "../components/dsl/ParamSchemaForm";
 import { ModelIRPreview } from "../components/dsl/ModelIRPreview";
+import { FEMResultsPanel } from "../components/dsl/FEMResultsPanel";
 import { SegmentedControl } from "../components/ui/SegmentedControl";
 import { useDslStore } from "../stores/dslStore";
 import type { ScriptDiagnostic } from "../dsl/executor";
@@ -85,10 +86,13 @@ export function ParametricEditorPage() {
         </aside>
 
         {/* === CENTER — 3D preview === */}
-        <main className="flex-1 relative min-w-0 min-h-0">
-          <ErrorBoundary label="ModelIR Preview">
-            <ModelIRPreview ir={ir} />
-          </ErrorBoundary>
+        <main className="flex-1 relative min-w-0 min-h-0 flex flex-col">
+          <div className="flex-1 min-h-0">
+            <ErrorBoundary label="ModelIR Preview">
+              <ModelIRPreview ir={ir} />
+            </ErrorBoundary>
+          </div>
+          <FEMResultsPanel />
         </main>
 
         {/* === RIGHT PANEL — Param form (desktop only) === */}

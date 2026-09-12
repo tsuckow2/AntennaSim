@@ -1,4 +1,4 @@
-import { buildFEMMesh } from "../mesh";
+import { buildFEMMesh, FEM_ATTR_PORT_NEGATIVE, FEM_ATTR_PORT_POSITIVE } from "../mesh";
 import { adaptFEMFrequencyData, buildFEMFrequencies, MFEM_CAPABILITIES, selectFEMPort, type FEMSimulationRequest, type FEMSimulationResult } from "../fem";
 import type { MfemSolverModule } from "./mfem-module";
 import { MFEM_ABI_VERSION, packMfemPointRequest, unpackMfemPointResponse } from "./mfem-abi";
@@ -80,15 +80,9 @@ function invokePoint(
 }
 
 async function solve(request: FEMSimulationRequest): Promise<FEMSimulationResult> {
-  const mesh = buildFEMMesh(request.model_ir, request.mesh_size_m);
   const port = selectFEMPort(request);
   if (port.positive.every((value, axis) => value === port.negative[axis])) throw new Error("Lumped-port terminals must be distinct");
-  if (mesh.boundaryAttributes.length === 0) {
-    throw new Error("Mesh artifact does not include conforming boundary/port attributes required by the production MFEM ABI");
-  }
-    if (mesh.portAttributes.length === 0) {
-      throw new Error("Mesh artifact does not include mapped positive/negative port facets required by the production MFEM ABI");
-    }
+  const mesh = buildFEMMesh(request.model_ir, request.mesh_size_m, port);
 
   const module = await (await loadFactory())({
     locateFile: (path: string) => path.endsWith(".wasm") ? `${import.meta.env.BASE_URL}wasm/mfem_solver.wasm` : path,
@@ -97,18 +91,22 @@ async function solve(request: FEMSimulationRequest): Promise<FEMSimulationResult
 
   const frequencies = buildFEMFrequencies(request.start_mhz, request.stop_mhz, request.steps);
   const startedAt = performance.now();
+  // Port attributes follow the positive-then-negative facet ordering.
+  const portAttr = new Uint32Array(mesh.portPositiveFacets.length + mesh.portNegativeFacets.length);
+  portAttr.fill(FEM_ATTR_PORT_POSITIVE, 0, mesh.portPositiveFacets.length);
+  portAttr.fill(FEM_ATTR_PORT_NEGATIVE, mesh.portPositiveFacets.length);
   const points = frequencies.map((frequencyMhz, pointIndex) => {
     const packed = packMfemPointRequest({
       frequencyHz: frequencyMhz * 1_000_000,
       vertices: mesh.vertices,
       tets: mesh.tetrahedra,
-      tetRegion: mesh.elementAttributes,
-      boundaryFacets: new Uint32Array(),
+      tetRegion: mesh.tetRegions,
+      boundaryFacets: mesh.boundaryFacets,
       boundaryAttr: mesh.boundaryAttributes,
-      portPosFacets: new Uint32Array(),
-      portNegFacets: new Uint32Array(),
-      portAttr: mesh.portAttributes,
-      materialTable: new Uint8Array(),
+      portPosFacets: mesh.portPositiveFacets,
+      portNegFacets: mesh.portNegativeFacets,
+      portAttr,
+      materialTable: mesh.materialTable,
       metadataJson: JSON.stringify({
         mesh_artifact_version: mesh.version,
         model_ir_version: request.model_ir.version,
@@ -145,10 +143,7 @@ async function solve(request: FEMSimulationRequest): Promise<FEMSimulationResult
     reference_impedance_ohms: request.reference_impedance_ohms,
     frequency_data: adaptFEMFrequencyData(points),
     resonant_frequency_mhz: null,
-    warnings: [
-      "TODO(native ABI): boundary facets, port facet mapping, and material table wiring are required before production physics validation.",
-      ...mesh.warnings,
-    ],
+    warnings: [...mesh.warnings],
     gain_data: {
       available: false,
       message: "Gain remains unavailable in FEM mode until validated far-field payloads are provided by the native solver.",

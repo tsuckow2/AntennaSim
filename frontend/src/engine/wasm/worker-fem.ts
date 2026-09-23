@@ -1,5 +1,6 @@
 import { buildFEMMesh, FEM_ATTR_PORT_NEGATIVE, FEM_ATTR_PORT_POSITIVE } from "../mesh";
-import { adaptFEMFrequencyData, buildFEMFrequencies, MFEM_CAPABILITIES, selectFEMPort, type FEMSimulationRequest, type FEMSimulationResult } from "../fem";
+import { adaptFEMFrequencyData, buildFEMFrequencies, MFEM_CAPABILITIES, selectFEMPort, type FEMPointStatus, type FEMSimulationRequest, type FEMSimulationResult } from "../fem";
+import { solveFEMPoint, type FEMSolverInput } from "../fem-solver";
 import type { MfemSolverModule } from "./mfem-module";
 import { MFEM_ABI_VERSION, packMfemPointRequest, unpackMfemPointResponse } from "./mfem-abi";
 
@@ -83,58 +84,116 @@ async function solve(request: FEMSimulationRequest): Promise<FEMSimulationResult
   const port = selectFEMPort(request);
   if (port.positive.every((value, axis) => value === port.negative[axis])) throw new Error("Lumped-port terminals must be distinct");
   const mesh = buildFEMMesh(request.model_ir, request.mesh_size_m, port);
-
-  const module = await (await loadFactory())({
-    locateFile: (path: string) => path.endsWith(".wasm") ? `${import.meta.env.BASE_URL}wasm/mfem_solver.wasm` : path,
-  });
-  assertModuleExports(module);
-
   const frequencies = buildFEMFrequencies(request.start_mhz, request.stop_mhz, request.steps);
   const startedAt = performance.now();
-  // Port attributes follow the positive-then-negative facet ordering.
-  const portAttr = new Uint32Array(mesh.portPositiveFacets.length + mesh.portNegativeFacets.length);
-  portAttr.fill(FEM_ATTR_PORT_POSITIVE, 0, mesh.portPositiveFacets.length);
-  portAttr.fill(FEM_ATTR_PORT_NEGATIVE, mesh.portPositiveFacets.length);
-  const points = frequencies.map((frequencyMhz, pointIndex) => {
-    const packed = packMfemPointRequest({
-      frequencyHz: frequencyMhz * 1_000_000,
-      vertices: mesh.vertices,
-      tets: mesh.tetrahedra,
-      tetRegion: mesh.tetRegions,
-      boundaryFacets: mesh.boundaryFacets,
-      boundaryAttr: mesh.boundaryAttributes,
-      portPosFacets: mesh.portPositiveFacets,
-      portNegFacets: mesh.portNegativeFacets,
-      portAttr,
-      materialTable: mesh.materialTable,
-      metadataJson: JSON.stringify({
-        mesh_artifact_version: mesh.version,
-        model_ir_version: request.model_ir.version,
-        reference_impedance_ohms: request.reference_impedance_ohms,
-        points_total: frequencies.length,
-        point_index: pointIndex,
-        solver_formulation: "real_block_complex",
-        absorbing_boundary: "silver_muller_first_order",
-        abi_version: MFEM_ABI_VERSION,
-      }),
+
+  // Prefer the native MFEM module when it is published; otherwise fall back
+  // to the TypeScript H(curl) reference solver so FEM simulation keeps working.
+  let module: MfemSolverModule | null = null;
+  let nativeError: string | null = null;
+  try {
+    const loaded = await (await loadFactory())({
+      locateFile: (path: string) => path.endsWith(".wasm") ? `${import.meta.env.BASE_URL}wasm/mfem_solver.wasm` : path,
     });
-    const rsp = invokePoint(module, packed);
-    return {
-      frequency_mhz: frequencyMhz,
-      point_status: rsp.pointStatus,
-      point_message: rsp.pointMessage,
-      impedance_real_ohms: rsp.zinRealOhms,
-      impedance_imag_ohms: rsp.zinImagOhms,
-      s11_real: rsp.s11Real,
-      s11_imag: rsp.s11Imag,
-      s11_db: null,
-      swr: null,
-    };
+    assertModuleExports(loaded);
+    module = loaded;
+  } catch (error) {
+    nativeError = error instanceof Error ? error.message : String(error);
+  }
+
+  const toPoint = (
+    frequencyMhz: number,
+    pointStatus: FEMPointStatus,
+    pointMessage: string | undefined,
+    zinRe: number | null,
+    zinIm: number | null,
+    s11Re: number | null,
+    s11Im: number | null,
+  ) => ({
+    frequency_mhz: frequencyMhz,
+    point_status: pointStatus,
+    point_message: pointMessage,
+    impedance_real_ohms: zinRe,
+    impedance_imag_ohms: zinIm,
+    s11_real: s11Re,
+    s11_imag: s11Im,
+    s11_db: null,
+    swr: null,
   });
+
+  let points: ReturnType<typeof toPoint>[];
+  let engine: FEMSimulationResult["engine"];
+  const warnings = [...mesh.warnings];
+  if (module) {
+    // Port attributes follow the positive-then-negative facet ordering.
+    const portAttr = new Uint32Array(mesh.portPositiveFacets.length + mesh.portNegativeFacets.length);
+    portAttr.fill(FEM_ATTR_PORT_POSITIVE, 0, mesh.portPositiveFacets.length);
+    portAttr.fill(FEM_ATTR_PORT_NEGATIVE, mesh.portPositiveFacets.length);
+    points = frequencies.map((frequencyMhz, pointIndex) => {
+      const packed = packMfemPointRequest({
+        frequencyHz: frequencyMhz * 1_000_000,
+        vertices: mesh.vertices,
+        tets: mesh.tetrahedra,
+        tetRegion: mesh.tetRegions,
+        boundaryFacets: mesh.boundaryFacets,
+        boundaryAttr: mesh.boundaryAttributes,
+        portPosFacets: mesh.portPositiveFacets,
+        portNegFacets: mesh.portNegativeFacets,
+        portAttr,
+        materialTable: mesh.materialTable,
+        metadataJson: JSON.stringify({
+          mesh_artifact_version: mesh.version,
+          model_ir_version: request.model_ir.version,
+          reference_impedance_ohms: request.reference_impedance_ohms,
+          points_total: frequencies.length,
+          point_index: pointIndex,
+          solver_formulation: "real_block_complex",
+          absorbing_boundary: "silver_muller_first_order",
+          abi_version: MFEM_ABI_VERSION,
+        }),
+      });
+      const rsp = invokePoint(module as MfemSolverModule, packed);
+      return toPoint(
+        frequencyMhz,
+        rsp.pointStatus,
+        rsp.pointMessage,
+        rsp.zinRealOhms,
+        rsp.zinImagOhms,
+        rsp.s11Real,
+        rsp.s11Imag,
+      );
+    });
+    engine = "mfem-wasm";
+  } else {
+    // TypeScript H(curl) fallback: same mesh, same port, one point at a time.
+    warnings.push(
+      `Native MFEM solver unavailable (${nativeError ?? "unknown load failure"}); ` +
+      "used the TypeScript H(curl) reference solver instead.",
+    );
+    const solverInputBase: Omit<FEMSolverInput, "frequencyHz"> = {
+      mesh,
+      referenceImpedanceOhms: request.reference_impedance_ohms,
+      portPositive: [port.positive[0] ?? 0, port.positive[1] ?? 0, port.positive[2] ?? 0],
+      portNegative: [port.negative[0] ?? 0, port.negative[1] ?? 0, port.negative[2] ?? 0],
+    };
+    points = frequencies.map((frequencyMhz) => {
+      const result = solveFEMPoint({ ...solverInputBase, frequencyHz: frequencyMhz * 1_000_000 });
+      return toPoint(
+        frequencyMhz,
+        result.status,
+        result.message,
+        result.impedanceOhms?.re ?? null,
+        result.impedanceOhms?.im ?? null,
+        result.s11?.re ?? null,
+        result.s11?.im ?? null,
+      );
+    });
+    engine = "fem-typescript";
+  }
 
   return {
     simulation_id: `mfem-${Date.now().toString(36)}`,
-    engine: "mfem-wasm",
+    engine,
     computed_in_ms: Math.round(performance.now() - startedAt),
     mesh: {
       ...mesh.statistics,
@@ -143,7 +202,7 @@ async function solve(request: FEMSimulationRequest): Promise<FEMSimulationResult
     reference_impedance_ohms: request.reference_impedance_ohms,
     frequency_data: adaptFEMFrequencyData(points),
     resonant_frequency_mhz: null,
-    warnings: [...mesh.warnings],
+    warnings,
     gain_data: {
       available: false,
       message: "Gain remains unavailable in FEM mode until validated far-field payloads are provided by the native solver.",

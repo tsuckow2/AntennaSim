@@ -48,7 +48,7 @@ export interface FEMSimulationRequest {
 
 export interface FEMSimulationResult {
   simulation_id: string;
-  engine: "mfem-wasm";
+  engine: "mfem-wasm" | "fem-typescript";
   computed_in_ms: number;
   mesh: FEMMeshArtifact["statistics"] & { warnings: string[] };
   reference_impedance_ohms: number;

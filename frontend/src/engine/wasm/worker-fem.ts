@@ -27,7 +27,17 @@ export interface FEMWorkerError {
   code?: "unsupported_solver_abi" | "invalid_mesh" | "worker_failure";
 }
 
-export type FEMWorkerResponse = FEMWorkerSuccess | FEMWorkerError;
+export interface FEMWorkerProgress {
+  type: "progress";
+  id: string;
+  generation: number;
+  /** 1-based count of fully solved frequency points (0 while meshing/loading). */
+  point_index: number;
+  points_total: number;
+  stage: "meshing" | "loading-mfem" | "solving";
+}
+
+export type FEMWorkerResponse = FEMWorkerSuccess | FEMWorkerError | FEMWorkerProgress;
 
 type MfemFactory = (options?: Record<string, unknown>) => Promise<MfemSolverModule>;
 let factory: MfemFactory | null = null;
@@ -80,12 +90,23 @@ function invokePoint(
   }
 }
 
-async function solve(request: FEMSimulationRequest): Promise<FEMSimulationResult> {
+type FEMProgressCallback = (
+  pointIndex: number,
+  pointsTotal: number,
+  stage: FEMWorkerProgress["stage"],
+) => void;
+
+async function solve(
+  request: FEMSimulationRequest,
+  onProgress: FEMProgressCallback,
+): Promise<FEMSimulationResult> {
   const port = selectFEMPort(request);
   if (port.positive.every((value, axis) => value === port.negative[axis])) throw new Error("Lumped-port terminals must be distinct");
+  onProgress(0, 0, "meshing");
   const mesh = buildFEMMesh(request.model_ir, request.mesh_size_m, port);
   const frequencies = buildFEMFrequencies(request.start_mhz, request.stop_mhz, request.steps);
   const startedAt = performance.now();
+  onProgress(0, frequencies.length, "loading-mfem");
 
   // Prefer the native MFEM module when it is published; otherwise fall back
   // to the TypeScript H(curl) reference solver so FEM simulation keeps working.
@@ -155,6 +176,7 @@ async function solve(request: FEMSimulationRequest): Promise<FEMSimulationResult
         }),
       });
       const rsp = invokePoint(module as MfemSolverModule, packed);
+      onProgress(pointIndex + 1, frequencies.length, "solving");
       return toPoint(
         frequencyMhz,
         rsp.pointStatus,
@@ -190,12 +212,13 @@ async function solve(request: FEMSimulationRequest): Promise<FEMSimulationResult
         phiStepDeg: request.far_field?.phi_step_deg,
       }
       : undefined;
-    const solved = frequencies.map((frequencyMhz) => {
+    const solved = frequencies.map((frequencyMhz, pointIndex) => {
       const result = solveFEMPoint({
         ...solverInputBase,
         frequencyHz: frequencyMhz * 1_000_000,
         ...(ffOptions ? { farField: ffOptions } : {}),
       });
+      onProgress(pointIndex + 1, frequencies.length, "solving");
       return {
         point: toPoint(
           frequencyMhz,
@@ -274,8 +297,17 @@ async function solve(request: FEMSimulationRequest): Promise<FEMSimulationResult
 self.onmessage = async (event: MessageEvent<FEMWorkerMessage>) => {
   const message = event.data;
   if (message.type !== "fem_simulate") return;
+  const postProgress: FEMProgressCallback = (point_index, points_total, stage) =>
+    self.postMessage({
+      type: "progress",
+      id: message.id,
+      generation: message.generation,
+      point_index,
+      points_total,
+      stage,
+    } satisfies FEMWorkerProgress);
   try {
-    self.postMessage({ type: "success", id: message.id, generation: message.generation, result: await solve(message.request) } satisfies FEMWorkerSuccess);
+    self.postMessage({ type: "success", id: message.id, generation: message.generation, result: await solve(message.request, postProgress) } satisfies FEMWorkerSuccess);
   } catch (error) {
     const text = error instanceof Error ? error.message : String(error);
     self.postMessage({

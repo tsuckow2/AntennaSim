@@ -42,6 +42,12 @@ interface DslState {
   femResult: FEMSimulationResult | null;
   femError: string | null;
   femRequestToken: number;
+  /** Latest worker progress while a FEM run is in flight (null otherwise). */
+  femProgress: {
+    pointIndex: number;
+    pointsTotal: number;
+    stage: string;
+  } | null;
 
   /** Replace the entire script source and reset execution state */
   setScript: (script: string) => void;
@@ -65,6 +71,7 @@ export const useDslStore = create<DslState>((set, get) => ({
   femResult: null,
   femError: null,
   femRequestToken: 0,
+  femProgress: null,
 
   setScript: (script) =>
     set((state) => ({
@@ -76,6 +83,7 @@ export const useDslStore = create<DslState>((set, get) => ({
       femStatus:
         state.femStatus === "running" || state.femResult ? "cancelled" : "idle",
       femError: null,
+      femProgress: null,
       femRequestToken: state.femRequestToken + 1,
     })),
 
@@ -148,17 +156,23 @@ export const useDslStore = create<DslState>((set, get) => ({
       return;
     }
     const token = state.femRequestToken + 1;
-    set({ femStatus: "running", femError: null, femRequestToken: token });
+    set({ femStatus: "running", femError: null, femProgress: null, femRequestToken: token });
     try {
       // FEM always runs in the browser via the FEM worker (native MFEM WASM
       // first, TypeScript H(curl) fallback flagged in the result warnings),
       // independent of the VITE_ENGINE selection used for NEC2 simulations.
-      const result = await runBrowserFEM({
-        ...options,
-        model_ir: modelIR as ModelIR,
-      });
+      const result = await runBrowserFEM(
+        {
+          ...options,
+          model_ir: modelIR as ModelIR,
+        },
+        (progress) => {
+          if (get().femRequestToken !== token) return;
+          set({ femProgress: progress });
+        },
+      );
       if (get().femRequestToken !== token) return;
-      set({ femStatus: "success", femResult: result, femError: null });
+      set({ femStatus: "success", femResult: result, femError: null, femProgress: null });
     } catch (error) {
       if (get().femRequestToken !== token) return;
       if (error instanceof FEMRunAbortedError) {
@@ -166,17 +180,19 @@ export const useDslStore = create<DslState>((set, get) => ({
           femStatus: error.kind === "cancelled" ? "cancelled" : "error",
           femResult: error.partialResult,
           femError: error.message,
+          femProgress: null,
         });
         return;
       }
       set({
         femStatus: "error",
         femError: error instanceof Error ? error.message : String(error),
+        femProgress: null,
       });
     }
   },
   cancelFEM: () => {
     cancelBrowserFEM();
-    set({ femStatus: "cancelled", femError: "FEM run cancelled" });
+    set({ femStatus: "cancelled", femError: "FEM run cancelled", femProgress: null });
   },
 }));

@@ -8,8 +8,17 @@ export function FEMResultsPanel() {
   const fem = useDslStore((state) => state.femResult);
   const femStatus = useDslStore((state) => state.femStatus);
   const femError = useDslStore((state) => state.femError);
+  const femProgress = useDslStore((state) => state.femProgress);
   if (femStatus === "idle" && !fem) return null;
-  if (femStatus === "running") return <div className="p-3 text-xs text-text-secondary">MFEM FEM run in progress...</div>;
+  if (femStatus === "running") {
+    const detail =
+      femProgress && femProgress.pointsTotal > 0 && femProgress.pointIndex > 0
+        ? ` — point ${femProgress.pointIndex} of ${femProgress.pointsTotal}`
+        : femProgress?.stage === "meshing"
+          ? " — meshing"
+          : "";
+    return <div className="p-3 text-xs text-text-secondary">FEM run in progress{detail}...</div>;
+  }
   if (femStatus === "error" && !fem) return <div className="p-3 text-xs text-swr-bad">FEM run failed: {femError}</div>;
   if (!fem) return null;
   const data = toNECFrequencyResults(fem);

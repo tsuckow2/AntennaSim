@@ -40,7 +40,20 @@ import {
   assertSupportedFrequencyRange,
 } from "../limits";
 
-const MFEM_PER_POINT_TIMEOUT_MS = 30000;
+/**
+ * Watchdog: maximum time without a progress message from the FEM worker before
+ * the run is treated as hung.  The TypeScript H(curl) fallback solver needs
+ * several minutes per frequency point on large meshes, so this is generous —
+ * progress (meshing done, each solved point) resets the timer.
+ */
+const FEM_POINT_TIMEOUT_MS = 15 * 60 * 1000;
+
+/** Progress update from the FEM worker for a single in-flight run. */
+export interface FEMProgressInfo {
+  pointIndex: number;
+  pointsTotal: number;
+  stage: "meshing" | "loading-mfem" | "solving";
+}
 
 // ---------------------------------------------------------------------------
 // Worker pool (single worker per type, lazy-initialized)
@@ -115,6 +128,7 @@ const pendingFEMRequests = new Map<string, {
   resolve: (result: FEMSimulationResult) => void;
   reject: (error: Error) => void;
   timeoutId: ReturnType<typeof setTimeout>;
+  onProgress?: (progress: FEMProgressInfo) => void;
 }>();
 let femWorkerListenerAttached = false;
 const pendingMfemSmokeRequests = new Map<string, { resolve: (trueDofs: number) => void; reject: (error: Error) => void }>();
@@ -125,12 +139,24 @@ function ensureFEMWorkerListener(): void {
   femWorkerListenerAttached = true;
   getFemWorker().addEventListener("message", (event: MessageEvent<FEMWorkerResponse>) => {
     if (event.data.generation !== femWorkerGeneration) return;
-    const pending = pendingFEMRequests.get(event.data.id);
+    const data = event.data;
+    if (data.type === "progress") {
+      const pending = pendingFEMRequests.get(data.id);
+      if (!pending) return;
+      resetFemWatchdog(data.id);
+      pending.onProgress?.({
+        pointIndex: data.point_index,
+        pointsTotal: data.points_total,
+        stage: data.stage,
+      });
+      return;
+    }
+    const pending = pendingFEMRequests.get(data.id);
     if (!pending) return;
     clearTimeout(pending.timeoutId);
-    pendingFEMRequests.delete(event.data.id);
-    if (event.data.type === "success") pending.resolve(event.data.result);
-    else pending.reject(new Error(event.data.message));
+    pendingFEMRequests.delete(data.id);
+    if (data.type === "success") pending.resolve(data.result);
+    else pending.reject(new Error(data.message));
   });
   getFemWorker().addEventListener("error", (event) => {
     const error = new Error(`FEM worker error: ${event.message}`);
@@ -149,6 +175,26 @@ function rejectPendingFemRequestsAsAborted(kind: "cancelled" | "timeout", messag
     pending.reject(new FEMRunAbortedError(kind, message, createStatusOnlyFEMResult(pending.request, kind, message)));
     pendingFEMRequests.delete(id);
   }
+}
+
+/** Start (or restart) the hung-worker watchdog for a pending FEM request. */
+function createFemWatchdog(id: string): ReturnType<typeof setTimeout> {
+  return setTimeout(() => {
+    const pending = pendingFEMRequests.get(id);
+    if (!pending || pending.generation !== femWorkerGeneration) return;
+    rejectPendingFemRequestsAsAborted(
+      "timeout",
+      `FEM run timed out after ${FEM_POINT_TIMEOUT_MS / 60000} minutes without progress`,
+    );
+    resetFemWorker();
+  }, FEM_POINT_TIMEOUT_MS);
+}
+
+function resetFemWatchdog(id: string): void {
+  const pending = pendingFEMRequests.get(id);
+  if (!pending || pending.generation !== femWorkerGeneration) return;
+  clearTimeout(pending.timeoutId);
+  pending.timeoutId = createFemWatchdog(id);
 }
 
 function ensureMfemWorkerListener(): void {
@@ -221,14 +267,11 @@ function ensureSimWorkerListener(): void {
  */
 export function runBrowserFEM(
   request: FEMSimulationRequest,
+  onProgress?: (progress: FEMProgressInfo) => void,
 ): Promise<FEMSimulationResult> {
   ensureFEMWorkerListener();
   const id = generateId();
   const generation = femWorkerGeneration;
-  const timeoutMs = Math.max(
-    MFEM_PER_POINT_TIMEOUT_MS,
-    request.steps * MFEM_PER_POINT_TIMEOUT_MS,
-  );
   const message: FEMWorkerMessage = {
     type: "fem_simulate",
     id,
@@ -236,21 +279,13 @@ export function runBrowserFEM(
     request,
   };
   return new Promise<FEMSimulationResult>((resolve, reject) => {
-    const timeoutId = setTimeout(() => {
-      const pending = pendingFEMRequests.get(id);
-      if (!pending || pending.generation !== generation) return;
-      rejectPendingFemRequestsAsAborted(
-        "timeout",
-        `FEM run timed out after ${timeoutMs} ms`,
-      );
-      resetFemWorker();
-    }, timeoutMs);
     pendingFEMRequests.set(id, {
       generation,
       request,
       resolve,
       reject,
-      timeoutId,
+      timeoutId: createFemWatchdog(id),
+      ...(onProgress ? { onProgress } : {}),
     });
     getFemWorker().postMessage(message);
   });

@@ -144,10 +144,43 @@ describe("WasmEngine FEM cancellation/timeout coordinator", () => {
     const promise = engine.simulateFEM!(request);
     void promise.catch(() => undefined);
 
-    await vi.advanceTimersByTimeAsync(30001);
+    await vi.advanceTimersByTimeAsync(15 * 60 * 1000 + 1);
     await expect(promise).rejects.toBeInstanceOf(FEMRunAbortedError);
     expect(MockWorker.instances[0]!.terminated).toBe(true);
     expect(MockWorker.instances.length).toBe(2);
+  });
+
+  it("resets the watchdog on worker progress messages", async () => {
+    vi.useFakeTimers();
+    const { runBrowserFEM } = await import("../index");
+    const { FEMRunAbortedError } = await import("../../fem");
+    const seen: Array<{ pointIndex: number; pointsTotal: number; stage: string }> = [];
+    const promise = runBrowserFEM(request, (progress) => {
+      seen.push(progress);
+    });
+    void promise.catch(() => undefined);
+    const worker = MockWorker.instances[0]!;
+    const msg = worker.lastPosted as FEMWorkerMessage;
+
+    // Progress just before the watchdog would fire keeps the run alive.
+    await vi.advanceTimersByTimeAsync(15 * 60 * 1000 - 1000);
+    worker.emitMessage({ type: "progress", id: msg.id, generation: msg.generation, point_index: 1, points_total: 5, stage: "solving" });
+    expect(seen).toEqual([{ pointIndex: 1, pointsTotal: 5, stage: "solving" }]);
+    await vi.advanceTimersByTimeAsync(15 * 60 * 1000 - 1000);
+    // Still alive: only ~15min-2s elapsed since the last progress message.
+    let settled = false;
+    void promise.then(
+      () => { settled = true; },
+      () => { settled = true; },
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    expect(settled).toBe(false);
+
+    // A stale-generation progress message must not reset the watchdog.
+    worker.emitMessage({ type: "progress", id: msg.id, generation: msg.generation + 1, point_index: 2, points_total: 5, stage: "solving" });
+    await vi.advanceTimersByTimeAsync(2000);
+    await expect(promise).rejects.toBeInstanceOf(FEMRunAbortedError);
+    expect(MockWorker.instances[0]!.terminated).toBe(true);
   });
 
   it("propagates current-generation worker errors", async () => {

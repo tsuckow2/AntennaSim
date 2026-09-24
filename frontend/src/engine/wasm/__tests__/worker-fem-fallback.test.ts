@@ -46,13 +46,23 @@ describe("worker-fem TypeScript fallback", () => {
       data: { type: "fem_simulate", id: "test-1", generation: 1, request } as FEMWorkerMessage,
     } as MessageEvent<FEMWorkerMessage>);
 
-    // Wait for the async worker to post its response.
+    // Wait for the async worker to post its terminal response (progress
+    // messages are posted first, so don't assume a single message).
     const deadline = Date.now() + 120000;
-    while (posted.length === 0 && Date.now() < deadline) {
+    let terminal = posted.find((p) => p.type === "success" || p.type === "error");
+    while (!terminal && Date.now() < deadline) {
       await new Promise((resolve) => setTimeout(resolve, 100));
+      terminal = posted.find((p) => p.type === "success" || p.type === "error");
     }
-    expect(posted.length).toBe(1);
-    const response = posted[0];
+    // Progress messages precede the terminal response.
+    const progress = posted.filter((p) => p.type === "progress");
+    expect(progress.length).toBeGreaterThan(0);
+    expect(progress[progress.length - 1]).toMatchObject({
+      point_index: 1,
+      points_total: 1,
+      stage: "solving",
+    });
+    const response = terminal;
     expect(response?.type).toBe("success");
     if (response?.type !== "success") return;
     expect(response.result.engine).toBe("fem-typescript");

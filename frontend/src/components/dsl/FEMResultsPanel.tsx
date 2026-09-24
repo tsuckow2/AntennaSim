@@ -1,6 +1,7 @@
 import { ImpedanceChart } from "../results/ImpedanceChart";
 import { SWRChart } from "../results/SWRChart";
 import { SmithChart } from "../results/SmithChart";
+import { FEMPattern3D } from "./FEMPattern3D";
 import { useDslStore } from "../../stores/dslStore";
 import { getFEMGainAvailabilityMessage, getRenderableFEMGainPoints, toNECFrequencyResults } from "../../engine/fem";
 
@@ -54,6 +55,7 @@ export function FEMResultsPanel() {
               </p>
             ))}
           </div>
+          <FEMPattern3D fem={fem} />
         </div>
       )}
       <p className="text-[11px] text-text-secondary mt-2">Resonant frequency: {fem.resonant_frequency_mhz === null ? "not available" : `${fem.resonant_frequency_mhz.toFixed(3)} MHz`}</p>

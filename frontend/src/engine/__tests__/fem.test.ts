@@ -4,6 +4,7 @@ import {
   buildFEMFrequencies,
   computeFEMSWR,
   createStatusOnlyFEMResult,
+  femGainPatternToNecPattern,
   getFEMGainAvailabilityMessage,
   getRenderableFEMGainPoints,
   MFEM_CAPABILITIES,
@@ -11,7 +12,7 @@ import {
   toNECFrequencyResults,
   validateFEMSweep,
 } from "../fem";
-import type { FEMSimulationRequest } from "../fem";
+import type { FEMGainPattern, FEMSimulationRequest } from "../fem";
 
 const request: FEMSimulationRequest = {
   model_ir: {
@@ -133,6 +134,46 @@ describe("browser FEM contract", () => {
     expect(buildFEMFrequencies(900, 936, 5)).toHaveLength(5);
     expect(MFEM_CAPABILITIES.gain).toBe(false);
     expect(MFEM_CAPABILITIES.far_field).toBe(false);
+  });
+
+  it("converts FEM far-field patterns to NEC PatternData for the 3D view", () => {
+    const pattern: FEMGainPattern = {
+      frequency_mhz: 908,
+      point_status: "ok",
+      theta_deg: [0, 90, 180],
+      phi_deg: [0, 180],
+      gain_dbi: [
+        [5, 5],
+        [3, 3],
+        [-10, -10],
+      ],
+      directivity_dbi: [
+        [5, 5],
+        [3, 3],
+        [-10, -10],
+      ],
+      max_gain_dbi: 5,
+      max_gain_theta_deg: 0,
+      max_gain_phi_deg: 0,
+      max_directivity_dbi: 5,
+      radiated_power_w: 1,
+      accepted_power_w: 1,
+      radiation_efficiency: 1,
+    };
+    const nec = femGainPatternToNecPattern(pattern);
+    expect(nec).not.toBeNull();
+    expect(nec?.theta_start).toBe(0);
+    expect(nec?.theta_step).toBe(90);
+    expect(nec?.theta_count).toBe(3);
+    expect(nec?.phi_start).toBe(0);
+    expect(nec?.phi_step).toBe(180);
+    expect(nec?.phi_count).toBe(2);
+    // [theta][phi] layout preserved.
+    expect(nec?.gain_dbi[0]?.[0]).toBe(5);
+    expect(nec?.gain_dbi[2]?.[1]).toBe(-10);
+    // Rejects degenerate grids.
+    expect(femGainPatternToNecPattern({ ...pattern, theta_deg: [0] })).toBeNull();
+    expect(femGainPatternToNecPattern({ ...pattern, gain_dbi: [[1]] })).toBeNull();
   });
 });
 

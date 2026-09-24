@@ -1549,11 +1549,12 @@ export function computeFarField(
       const lTi = lIx * thx + lIy * thy + lIz * thz;
       const lPr = lRx * phx + lRy * phy;
       const lPi = lIx * phx + lIy * phy;
-      // r-normalized far E-field: Et = -j k0/(4 pi) (eta N + L) (theta/phi parts).
-      const etTr = k0Over4Pi * (ETA0 * nTi + lTi);
-      const etTi = -k0Over4Pi * (ETA0 * nTr + lTr);
-      const etPr = k0Over4Pi * (ETA0 * nPi - lPi);
-      const etPi = -k0Over4Pi * (ETA0 * nPr - lPr);
+      // r-normalized far E-field (Balanis): E_th = -j k0/(4 pi) (eta0 N_th + L_ph),
+      // E_ph = -j k0/(4 pi) (eta0 N_ph - L_th). Note the crossed L components.
+      const etTr = k0Over4Pi * (ETA0 * nTi + lPi);
+      const etTi = -k0Over4Pi * (ETA0 * nTr + lPr);
+      const etPr = k0Over4Pi * (ETA0 * nPi - lTi);
+      const etPi = -k0Over4Pi * (ETA0 * nPr - lTr);
       const u = (etTr * etTr + etTi * etTi + etPr * etPr + etPi * etPi) / (2 * ETA0);
       uRow.push(u);
     }

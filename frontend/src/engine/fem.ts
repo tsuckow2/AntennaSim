@@ -309,6 +309,42 @@ export function getRenderableFEMGainPoints(result: FEMSimulationResult): Array<{
   });
 }
 
+/**
+ * Convert a FEM far-field pattern to the NEC PatternData shape expected by
+ * RadiationPattern3D. Returns null when the pattern grid is missing,
+ * non-uniform, or degenerate. The FEM [theta][phi] gain layout matches the
+ * NEC component's indexing, and both use theta-from-+Z conventions.
+ */
+export function femGainPatternToNecPattern(pattern: FEMGainPattern): import("../api/nec").PatternData | null {
+  const thetaDeg = pattern.theta_deg;
+  const phiDeg = pattern.phi_deg;
+  const gainDbi = pattern.gain_dbi;
+  if (thetaDeg.length < 2 || phiDeg.length < 2) return null;
+  if (gainDbi.length !== thetaDeg.length) return null;
+  for (const row of gainDbi) {
+    if (!row || row.length !== phiDeg.length) return null;
+  }
+  const thetaStep = (thetaDeg[1] ?? 0) - (thetaDeg[0] ?? 0);
+  const phiStep = (phiDeg[1] ?? 0) - (phiDeg[0] ?? 0);
+  if (!(thetaStep > 0) || !(phiStep > 0)) return null;
+  // FEM grids are generated uniformly; reject anything else rather than resampling silently.
+  for (let i = 2; i < thetaDeg.length; i += 1) {
+    if (Math.abs(((thetaDeg[i] ?? 0) - (thetaDeg[i - 1] ?? 0)) - thetaStep) > 1e-9) return null;
+  }
+  for (let j = 2; j < phiDeg.length; j += 1) {
+    if (Math.abs(((phiDeg[j] ?? 0) - (phiDeg[j - 1] ?? 0)) - phiStep) > 1e-9) return null;
+  }
+  return {
+    theta_start: thetaDeg[0] ?? 0,
+    theta_step: thetaStep,
+    theta_count: thetaDeg.length,
+    phi_start: phiDeg[0] ?? 0,
+    phi_step: phiStep,
+    phi_count: phiDeg.length,
+    gain_dbi: gainDbi.map((row) => [...(row ?? [])]),
+  };
+}
+
 export function selectFEMPort(request: FEMSimulationRequest): { positive: [number, number, number]; negative: [number, number, number]; id: string } {
   const diagnostics = validateModelIR(request.model_ir);
   if (diagnostics.some((diagnostic) => diagnostic.severity === "error")) {

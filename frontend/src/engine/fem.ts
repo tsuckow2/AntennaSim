@@ -18,10 +18,33 @@ export interface FEMGainPoint {
   phi_deg: number | null;
 }
 
+/** Full far-field pattern for one frequency point (gain-plot data). */
+export interface FEMGainPattern {
+  frequency_mhz: number;
+  point_status: FEMPointStatus;
+  /** Polar angles in degrees, 0..180. */
+  theta_deg: number[];
+  /** Azimuth angles in degrees, 0..<360. */
+  phi_deg: number[];
+  /** IEEE gain in dBi on the [theta][phi] grid. */
+  gain_dbi: number[][];
+  /** Directivity in dBi on the [theta][phi] grid. */
+  directivity_dbi: number[][];
+  max_gain_dbi: number;
+  max_gain_theta_deg: number;
+  max_gain_phi_deg: number;
+  max_directivity_dbi: number;
+  radiated_power_w: number;
+  accepted_power_w: number;
+  radiation_efficiency: number;
+}
+
 export interface FEMGainData {
   available: boolean;
   message?: string;
   points?: FEMGainPoint[];
+  /** Per-frequency far-field patterns for gain plots, when computed. */
+  patterns?: FEMGainPattern[];
 }
 
 export interface FEMFrequencyPoint {
@@ -44,6 +67,16 @@ export interface FEMSimulationRequest {
   mesh_size_m: number;
   reference_impedance_ohms: number;
   port_id?: string;
+  /**
+   * Far-field request for the TypeScript fallback solver. When omitted the
+   * fallback computes a 5-degree pattern per frequency point; set enabled to
+   * false to skip it. Ignored by the native MFEM path.
+   */
+  far_field?: {
+    enabled: boolean;
+    theta_step_deg?: number;
+    phi_step_deg?: number;
+  };
 }
 
 export interface FEMSimulationResult {

@@ -204,6 +204,47 @@ describe("FEM H(curl) solver", () => {
     expect(Math.abs(z?.im ?? 1e9)).toBeLessThanOrEqual(200);
   }, 120000);
 
+  it("computes a physical far-field pattern for the dipole", () => {
+    const mesh = buildFEMMesh(dipoleIR(), 0.004);
+    const result = solveFEMPoint({
+      mesh,
+      frequencyHz: 3e9,
+      referenceImpedanceOhms: 50,
+      portPositive: DIPOLE_POS,
+      portNegative: DIPOLE_NEG,
+      farField: { thetaStepDeg: 5, phiStepDeg: 5 },
+    });
+    expect(result.status).toBe("ok");
+    const ff = result.farField;
+    expect(ff).not.toBeNull();
+    if (!ff) return;
+    // Grid shape matches the requested sampling.
+    expect(ff.thetaDeg.length).toBe(37);
+    expect(ff.phiDeg.length).toBe(72);
+    expect(ff.gainDbi.length).toBe(37);
+    expect(ff.gainDbi[0]?.length).toBe(72);
+    // A ~half-wave dipole has ~2.15 dBi directivity; allow solver/ABC margin.
+    expect(ff.maxDirectivityDbi).toBeGreaterThanOrEqual(1.5);
+    expect(ff.maxDirectivityDbi).toBeLessThanOrEqual(2.9);
+    // The max must lie broadside to the x-directed dipole (|r.x| small).
+    const thetaR = (ff.maxGainThetaDeg * Math.PI) / 180;
+    const phiR = (ff.maxGainPhiDeg * Math.PI) / 180;
+    expect(Math.abs(Math.sin(thetaR) * Math.cos(phiR))).toBeLessThan(0.5);
+    // Deep null along the dipole axis (+x): theta=90, phi=0.
+    const ti = ff.thetaDeg.findIndex((t) => Math.abs(t - 90) < 1e-9);
+    const pj = ff.phiDeg.findIndex((p) => Math.abs(p - 0) < 1e-9);
+    expect(ff.gainDbi[ti]?.[pj] ?? 0).toBeLessThan(-20);
+    // Power balance: efficiency is physical and gain/directivity are consistent.
+    expect(ff.radiationEfficiency).toBeGreaterThan(0.5);
+    expect(ff.radiationEfficiency).toBeLessThan(1.1);
+    expect(ff.maxGainDbi).toBeCloseTo(
+      ff.maxDirectivityDbi + 10 * Math.log10(ff.radiationEfficiency),
+      2,
+    );
+    // Accepted power matches 1 A into Re(Zin).
+    expect(ff.acceptedPowerW).toBeCloseTo(0.5 * (result.impedanceOhms?.re ?? 0), 9);
+  }, 120000);
+
   it("is bit-deterministic across repeated solves", () => {
     const mesh = buildFEMMesh(dipoleIR(), 0.004);
     const args = {

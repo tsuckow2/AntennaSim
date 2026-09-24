@@ -123,6 +123,8 @@ async function solve(request: FEMSimulationRequest): Promise<FEMSimulationResult
 
   let points: ReturnType<typeof toPoint>[];
   let engine: FEMSimulationResult["engine"];
+  let gainData: FEMSimulationResult["gain_data"];
+  let capabilities: FEMSimulationResult["capabilities"];
   const warnings = [...mesh.warnings];
   if (module) {
     // Port attributes follow the positive-then-negative facet ordering.
@@ -164,30 +166,91 @@ async function solve(request: FEMSimulationRequest): Promise<FEMSimulationResult
       );
     });
     engine = "mfem-wasm";
+    gainData = {
+      available: false,
+      message: "Gain remains unavailable in FEM mode until validated far-field payloads are provided by the native solver.",
+    };
+    capabilities = MFEM_CAPABILITIES;
   } else {
     // TypeScript H(curl) fallback: same mesh, same port, one point at a time.
     warnings.push(
       `Native MFEM solver unavailable (${nativeError ?? "unknown load failure"}); ` +
       "used the TypeScript H(curl) reference solver instead.",
     );
-    const solverInputBase: Omit<FEMSolverInput, "frequencyHz"> = {
+    const solverInputBase: Omit<FEMSolverInput, "frequencyHz" | "farField"> = {
       mesh,
       referenceImpedanceOhms: request.reference_impedance_ohms,
       portPositive: [port.positive[0] ?? 0, port.positive[1] ?? 0, port.positive[2] ?? 0],
       portNegative: [port.negative[0] ?? 0, port.negative[1] ?? 0, port.negative[2] ?? 0],
     };
-    points = frequencies.map((frequencyMhz) => {
-      const result = solveFEMPoint({ ...solverInputBase, frequencyHz: frequencyMhz * 1_000_000 });
-      return toPoint(
+    const ffEnabled = request.far_field?.enabled ?? true;
+    const ffOptions = ffEnabled
+      ? {
+        thetaStepDeg: request.far_field?.theta_step_deg,
+        phiStepDeg: request.far_field?.phi_step_deg,
+      }
+      : undefined;
+    const solved = frequencies.map((frequencyMhz) => {
+      const result = solveFEMPoint({
+        ...solverInputBase,
+        frequencyHz: frequencyMhz * 1_000_000,
+        ...(ffOptions ? { farField: ffOptions } : {}),
+      });
+      return {
+        point: toPoint(
+          frequencyMhz,
+          result.status,
+          result.message,
+          result.impedanceOhms?.re ?? null,
+          result.impedanceOhms?.im ?? null,
+          result.s11?.re ?? null,
+          result.s11?.im ?? null,
+        ),
+        farField: result.farField,
         frequencyMhz,
-        result.status,
-        result.message,
-        result.impedanceOhms?.re ?? null,
-        result.impedanceOhms?.im ?? null,
-        result.s11?.re ?? null,
-        result.s11?.im ?? null,
-      );
+      };
     });
+    points = solved.map((s) => s.point);
+    const patterns = solved.flatMap((s) => {
+      const ff = s.farField;
+      if (!ff) return [];
+      return [{
+        frequency_mhz: s.frequencyMhz,
+        point_status: s.point.point_status,
+        theta_deg: [...ff.thetaDeg],
+        phi_deg: [...ff.phiDeg],
+        gain_dbi: ff.gainDbi.map((row) => [...row]),
+        directivity_dbi: ff.directivityDbi.map((row) => [...row]),
+        max_gain_dbi: ff.maxGainDbi,
+        max_gain_theta_deg: ff.maxGainThetaDeg,
+        max_gain_phi_deg: ff.maxGainPhiDeg,
+        max_directivity_dbi: ff.maxDirectivityDbi,
+        radiated_power_w: ff.radiatedPowerW,
+        accepted_power_w: ff.acceptedPowerW,
+        radiation_efficiency: ff.radiationEfficiency,
+      }];
+    });
+    gainData = patterns.length > 0
+      ? {
+        available: true,
+        points: patterns.map((p) => ({
+          frequency_mhz: p.frequency_mhz,
+          point_status: p.point_status,
+          gain_dbi: p.max_gain_dbi,
+          theta_deg: p.max_gain_theta_deg,
+          phi_deg: p.max_gain_phi_deg,
+        })),
+        patterns,
+      }
+      : {
+        available: false,
+        message: "Far-field computation was disabled or did not produce a pattern for this run.",
+      };
+    capabilities = {
+      ...MFEM_CAPABILITIES,
+      far_field: patterns.length > 0,
+      gain: patterns.length > 0,
+    };
     engine = "fem-typescript";
   }
 
@@ -203,11 +266,8 @@ async function solve(request: FEMSimulationRequest): Promise<FEMSimulationResult
     frequency_data: adaptFEMFrequencyData(points),
     resonant_frequency_mhz: null,
     warnings,
-    gain_data: {
-      available: false,
-      message: "Gain remains unavailable in FEM mode until validated far-field payloads are provided by the native solver.",
-    },
-    capabilities: MFEM_CAPABILITIES,
+    gain_data: gainData,
+    capabilities,
   };
 }
 

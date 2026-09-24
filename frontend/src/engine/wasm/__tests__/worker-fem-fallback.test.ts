@@ -65,6 +65,20 @@ describe("worker-fem TypeScript fallback", () => {
     expect(point?.point_status).toBe("ok");
     expect(Number.isFinite(point?.impedance_real_ohms ?? Number.NaN)).toBe(true);
     expect(Number.isFinite(point?.impedance_imag_ohms ?? Number.NaN)).toBe(true);
+    // Far-field is computed by default and mapped into gain_data.
+    expect(response.result.capabilities.gain).toBe(true);
+    expect(response.result.capabilities.far_field).toBe(true);
+    const gainData = response.result.gain_data;
+    expect(gainData?.available).toBe(true);
+    expect(gainData?.patterns?.length).toBe(1);
+    const pattern = gainData?.patterns?.[0];
+    expect(pattern?.frequency_mhz).toBe(3000);
+    expect(Number.isFinite(pattern?.max_gain_dbi ?? Number.NaN)).toBe(true);
+    expect(pattern?.theta_deg.length).toBeGreaterThan(0);
+    expect(pattern?.gain_dbi.length).toBe(pattern?.theta_deg.length);
+    // Backwards-compatible max-gain points are populated for existing UI.
+    expect(gainData?.points?.length).toBe(1);
+    expect(gainData?.points?.[0]?.gain_dbi).toBe(pattern?.max_gain_dbi);
 
     vi.unstubAllGlobals();
   }, 180000);

@@ -1232,12 +1232,399 @@ function portVoltage(
 /* Top-level driven solve                                                */
 /* ------------------------------------------------------------------ */
 
+/* ------------------------------------------------------------------ */
+/* Far-field (near-to-far-field transform)                               */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Options for the near-to-far-field transform. The equivalent electric and
+ * magnetic surface currents (J_s = n x H, M_s = E x n) are formed on the
+ * absorbing outer boundary and radiated to the far field with the
+ * Stratton-Chu integrals under the e^{jwt} convention.
+ */
+export interface FEMFarFieldOptions {
+  /** Polar sampling step in degrees, (0, 30]. Defaults to 5. */
+  thetaStepDeg?: number;
+  /** Azimuth sampling step in degrees, (0, 60]. Defaults to 5. */
+  phiStepDeg?: number;
+}
+
+export interface FEMFarFieldResult {
+  /** Polar angles in degrees, 0..180. */
+  thetaDeg: number[];
+  /** Azimuth angles in degrees, 0..<360. */
+  phiDeg: number[];
+  /** IEEE gain in dBi on the [theta][phi] grid (4*pi*U / P_accepted). */
+  gainDbi: number[][];
+  /** Directivity in dBi on the [theta][phi] grid (4*pi*U / P_radiated). */
+  directivityDbi: number[][];
+  maxGainDbi: number;
+  maxGainThetaDeg: number;
+  maxGainPhiDeg: number;
+  maxDirectivityDbi: number;
+  radiatedPowerW: number;
+  acceptedPowerW: number;
+  /** radiatedPowerW / acceptedPowerW. */
+  radiationEfficiency: number;
+  timingMs: number;
+}
+
+const ETA0 = Math.sqrt(MU0 / EPS0);
+
+function muRofTet(mesh: FEMMeshArtifact, tet: number): number {
+  const region = mesh.tetRegions[tet] ?? 0;
+  for (const entry of mesh.materials) {
+    if (entry.attribute === region) return entry.mu_r > 0 ? entry.mu_r : 1;
+  }
+  return 1;
+}
+
+/**
+ * Compute the far-field pattern from a solved H(curl) field via equivalent
+ * surface currents on the absorbing boundary. Throws on invalid input or
+ * degenerate results; callers map failures to a null far-field payload.
+ */
+export function computeFarField(
+  mesh: FEMMeshArtifact,
+  system: EdgeSystem,
+  xRe: Float64Array,
+  xIm: Float64Array,
+  frequencyHz: number,
+  acceptedPowerW: number,
+  options?: FEMFarFieldOptions,
+): FEMFarFieldResult {
+  const t0 = performance.now();
+  if (!(acceptedPowerW > 0) || !Number.isFinite(acceptedPowerW)) {
+    throw new Error("acceptedPowerW must be a positive finite value");
+  }
+  if (!Number.isFinite(frequencyHz) || frequencyHz <= 0) {
+    throw new Error("frequencyHz must be a positive finite value");
+  }
+  const thetaStep = options?.thetaStepDeg ?? 5;
+  const phiStep = options?.phiStepDeg ?? 5;
+  if (!(thetaStep > 0) || !(phiStep > 0) || thetaStep > 30 || phiStep > 60) {
+    throw new Error("far-field sampling steps must lie in (0, 30] x (0, 60] degrees");
+  }
+  const nTheta = Math.max(2, Math.round(180 / thetaStep) + 1);
+  const nPhi = Math.max(2, Math.round(360 / phiStep));
+  const omega = 2 * Math.PI * frequencyHz;
+  const k0 = omega / C0;
+
+  // Expand the free-DOF solution onto all global edges (PEC edges read zero).
+  const edgeRe = new Float64Array(system.edgeCount);
+  const edgeIm = new Float64Array(system.edgeCount);
+  for (let e = 0; e < system.edgeCount; e += 1) {
+    const d = system.dofOfEdge[e] ?? -1;
+    if (d >= 0) {
+      edgeRe[e] = xRe[d] ?? 0;
+      edgeIm[e] = xIm[d] ?? 0;
+    }
+  }
+
+  // Map each active-tet face to its tet ordinal so boundary facets resolve
+  // to the adjacent volume element.
+  const facetToTet = new Map<string, number>();
+  for (let t = 0; t < system.activeTetCount; t += 1) {
+    const tet = system.activeTets[t] ?? 0;
+    const v0 = mesh.tetrahedra[tet * 4] ?? 0;
+    const v1 = mesh.tetrahedra[tet * 4 + 1] ?? 0;
+    const v2 = mesh.tetrahedra[tet * 4 + 2] ?? 0;
+    const v3 = mesh.tetrahedra[tet * 4 + 3] ?? 0;
+    facetToTet.set(facetKey(v1, v2, v3), t);
+    facetToTet.set(facetKey(v0, v2, v3), t);
+    facetToTet.set(facetKey(v0, v1, v3), t);
+    facetToTet.set(facetKey(v0, v1, v2), t);
+  }
+
+  // Huygens surface: area-weighted equivalent currents on the absorbing boundary.
+  const srcX: number[] = [];
+  const srcY: number[] = [];
+  const srcZ: number[] = [];
+  const aJre: number[] = [];
+  const aJim: number[] = [];
+  const aMre: number[] = [];
+  const aMim: number[] = [];
+  const facetCount = mesh.boundaryFacets.length / 3;
+  for (let bf = 0; bf < facetCount; bf += 1) {
+    if ((mesh.boundaryAttributes[bf] ?? 0) !== FEM_ATTR_EXTERIOR_ABSORBING) continue;
+    const u = mesh.boundaryFacets[bf * 3] ?? 0;
+    const v = mesh.boundaryFacets[bf * 3 + 1] ?? 0;
+    const w = mesh.boundaryFacets[bf * 3 + 2] ?? 0;
+    const ord = facetToTet.get(facetKey(u, v, w));
+    if (ord === undefined) continue;
+    const tet = system.activeTets[ord] ?? 0;
+    const geom = tetGeometry(mesh.vertices, mesh.tetrahedra, tet);
+    const grad = geom.grad;
+    const pux = mesh.vertices[u * 3] ?? 0;
+    const puy = mesh.vertices[u * 3 + 1] ?? 0;
+    const puz = mesh.vertices[u * 3 + 2] ?? 0;
+    const pvx = mesh.vertices[v * 3] ?? 0;
+    const pvy = mesh.vertices[v * 3 + 1] ?? 0;
+    const pvz = mesh.vertices[v * 3 + 2] ?? 0;
+    const pwx = mesh.vertices[w * 3] ?? 0;
+    const pwy = mesh.vertices[w * 3 + 1] ?? 0;
+    const pwz = mesh.vertices[w * 3 + 2] ?? 0;
+    let nx = (pvy - puy) * (pwz - puz) - (pvz - puz) * (pwy - puy);
+    let ny = (pvz - puz) * (pwx - pux) - (pvx - pux) * (pwz - puz);
+    let nz = (pvx - pux) * (pwy - puy) - (pvy - puy) * (pwx - pux);
+    const area2 = Math.sqrt(nx * nx + ny * ny + nz * nz);
+    if (!(area2 > 0)) continue;
+    const area = area2 / 2;
+    nx /= area2;
+    ny /= area2;
+    nz /= area2;
+    // Force the normal outward (away from the tet interior).
+    const ox = (pux + pvx + pwx) / 3 - (geom.centroid[0] ?? 0);
+    const oy = (puy + pvy + pwy) / 3 - (geom.centroid[1] ?? 0);
+    const oz = (puz + pvz + pwz) / 3 - (geom.centroid[2] ?? 0);
+    if (nx * ox + ny * oy + nz * oz < 0) {
+      nx = -nx;
+      ny = -ny;
+      nz = -nz;
+    }
+    // Reconstruct E and curl E at the facet centroid (barycentric 1/4).
+    // Basis: N_e = s_e * l_e * (lambda_a grad_b - lambda_b grad_a),
+    // curl N_e = s_e * 2 * l_e * (grad_a x grad_b).
+    let eReX = 0;
+    let eReY = 0;
+    let eReZ = 0;
+    let eImX = 0;
+    let eImY = 0;
+    let eImZ = 0;
+    let cReX = 0;
+    let cReY = 0;
+    let cReZ = 0;
+    let cImX = 0;
+    let cImY = 0;
+    let cImZ = 0;
+    for (let e = 0; e < 6; e += 1) {
+      const pair = TET_EDGES[e] ?? [0, 1];
+      const a = pair[0] ?? 0;
+      const b = pair[1] ?? 0;
+      const s = system.tetEdgeSign[ord * 6 + e] ?? 1;
+      const ge = system.tetEdges[ord * 6 + e] ?? 0;
+      const er = edgeRe[ge] ?? 0;
+      const ei = edgeIm[ge] ?? 0;
+      if (er === 0 && ei === 0) continue;
+      const va = mesh.tetrahedra[tet * 4 + a] ?? 0;
+      const vb = mesh.tetrahedra[tet * 4 + b] ?? 0;
+      const len = Math.sqrt(
+        ((mesh.vertices[vb * 3] ?? 0) - (mesh.vertices[va * 3] ?? 0)) ** 2 +
+          ((mesh.vertices[vb * 3 + 1] ?? 0) - (mesh.vertices[va * 3 + 1] ?? 0)) ** 2 +
+          ((mesh.vertices[vb * 3 + 2] ?? 0) - (mesh.vertices[va * 3 + 2] ?? 0)) ** 2,
+      );
+      const gax = grad[a * 3] ?? 0;
+      const gay = grad[a * 3 + 1] ?? 0;
+      const gaz = grad[a * 3 + 2] ?? 0;
+      const gbx = grad[b * 3] ?? 0;
+      const gby = grad[b * 3 + 1] ?? 0;
+      const gbz = grad[b * 3 + 2] ?? 0;
+      const f = (s * len) / 4;
+      const nvx = f * (gbx - gax);
+      const nvy = f * (gby - gay);
+      const nvz = f * (gbz - gaz);
+      eReX += er * nvx;
+      eReY += er * nvy;
+      eReZ += er * nvz;
+      eImX += ei * nvx;
+      eImY += ei * nvy;
+      eImZ += ei * nvz;
+      const g = s * 2 * len;
+      const cvx = g * (gay * gbz - gaz * gby);
+      const cvy = g * (gaz * gbx - gax * gbz);
+      const cvz = g * (gax * gby - gay * gbx);
+      cReX += er * cvx;
+      cReY += er * cvy;
+      cReZ += er * cvz;
+      cImX += ei * cvx;
+      cImY += ei * cvy;
+      cImZ += ei * cvz;
+    }
+    // H = j * curlE / (omega * mu).
+    const invWmu = 1 / (omega * MU0 * muRofTet(mesh, tet));
+    const hReX = -cImX * invWmu;
+    const hReY = -cImY * invWmu;
+    const hReZ = -cImZ * invWmu;
+    const hImX = cReX * invWmu;
+    const hImY = cReY * invWmu;
+    const hImZ = cReZ * invWmu;
+    // J_s = n x H, M_s = E x n.
+    const jReX = ny * hReZ - nz * hReY;
+    const jReY = nz * hReX - nx * hReZ;
+    const jReZ = nx * hReY - ny * hReX;
+    const jImX = ny * hImZ - nz * hImY;
+    const jImY = nz * hImX - nx * hImZ;
+    const jImZ = nx * hImY - ny * hImX;
+    const mReX = eReY * nz - eReZ * ny;
+    const mReY = eReZ * nx - eReX * nz;
+    const mReZ = eReX * ny - eReY * nx;
+    const mImX = eImY * nz - eImZ * ny;
+    const mImY = eImZ * nx - eImX * nz;
+    const mImZ = eImX * ny - eImY * nx;
+    srcX.push((pux + pvx + pwx) / 3);
+    srcY.push((puy + pvy + pwy) / 3);
+    srcZ.push((puz + pvz + pwz) / 3);
+    aJre.push(area * jReX, area * jReY, area * jReZ);
+    aJim.push(area * jImX, area * jImY, area * jImZ);
+    aMre.push(area * mReX, area * mReY, area * mReZ);
+    aMim.push(area * mImX, area * mImY, area * mImZ);
+  }
+  const srcCount = srcX.length;
+  if (srcCount === 0) throw new Error("no absorbing-boundary facets found for the far-field transform");
+
+  // Radiate the equivalent currents: N = sum aJ e^{jk r^.r'}, L = sum aM e^{jk r^.r'}.
+  const thetaDeg: number[] = [];
+  for (let ti = 0; ti < nTheta; ti += 1) thetaDeg.push((ti * 180) / (nTheta - 1));
+  const phiDeg: number[] = [];
+  for (let pj = 0; pj < nPhi; pj += 1) phiDeg.push((pj * 360) / nPhi);
+  const k0Over4Pi = k0 / (4 * Math.PI);
+  const dTheta = Math.PI / (nTheta - 1);
+  const dPhi = (2 * Math.PI) / nPhi;
+  const uGrid: number[][] = [];
+  for (let ti = 0; ti < nTheta; ti += 1) {
+    const theta = ((thetaDeg[ti] ?? 0) * Math.PI) / 180;
+    const st = Math.sin(theta);
+    const ct = Math.cos(theta);
+    const uRow: number[] = [];
+    for (let pj = 0; pj < nPhi; pj += 1) {
+      const phi = ((phiDeg[pj] ?? 0) * Math.PI) / 180;
+      const sp = Math.sin(phi);
+      const cp = Math.cos(phi);
+      const rhx = st * cp;
+      const rhy = st * sp;
+      const rhz = ct;
+      const thx = ct * cp;
+      const thy = ct * sp;
+      const thz = -st;
+      const phx = -sp;
+      const phy = cp;
+      let nRx = 0;
+      let nRy = 0;
+      let nRz = 0;
+      let nIx = 0;
+      let nIy = 0;
+      let nIz = 0;
+      let lRx = 0;
+      let lRy = 0;
+      let lRz = 0;
+      let lIx = 0;
+      let lIy = 0;
+      let lIz = 0;
+      for (let q = 0; q < srcCount; q += 1) {
+        const phase = k0 * (rhx * (srcX[q] ?? 0) + rhy * (srcY[q] ?? 0) + rhz * (srcZ[q] ?? 0));
+        const c = Math.cos(phase);
+        const s = Math.sin(phase);
+        const j3 = q * 3;
+        const jr0 = aJre[j3] ?? 0;
+        const jr1 = aJre[j3 + 1] ?? 0;
+        const jr2 = aJre[j3 + 2] ?? 0;
+        const ji0 = aJim[j3] ?? 0;
+        const ji1 = aJim[j3 + 1] ?? 0;
+        const ji2 = aJim[j3 + 2] ?? 0;
+        const mr0 = aMre[j3] ?? 0;
+        const mr1 = aMre[j3 + 1] ?? 0;
+        const mr2 = aMre[j3 + 2] ?? 0;
+        const mi0 = aMim[j3] ?? 0;
+        const mi1 = aMim[j3 + 1] ?? 0;
+        const mi2 = aMim[j3 + 2] ?? 0;
+        nRx += jr0 * c - ji0 * s;
+        nRy += jr1 * c - ji1 * s;
+        nRz += jr2 * c - ji2 * s;
+        nIx += jr0 * s + ji0 * c;
+        nIy += jr1 * s + ji1 * c;
+        nIz += jr2 * s + ji2 * c;
+        lRx += mr0 * c - mi0 * s;
+        lRy += mr1 * c - mi1 * s;
+        lRz += mr2 * c - mi2 * s;
+        lIx += mr0 * s + mi0 * c;
+        lIy += mr1 * s + mi1 * c;
+        lIz += mr2 * s + mi2 * c;
+      }
+      // Spherical components of N and L (basis vectors are real).
+      const nTr = nRx * thx + nRy * thy + nRz * thz;
+      const nTi = nIx * thx + nIy * thy + nIz * thz;
+      const nPr = nRx * phx + nRy * phy;
+      const nPi = nIx * phx + nIy * phy;
+      const lTr = lRx * thx + lRy * thy + lRz * thz;
+      const lTi = lIx * thx + lIy * thy + lIz * thz;
+      const lPr = lRx * phx + lRy * phy;
+      const lPi = lIx * phx + lIy * phy;
+      // r-normalized far E-field: Et = -j k0/(4 pi) (eta N + L) (theta/phi parts).
+      const etTr = k0Over4Pi * (ETA0 * nTi + lTi);
+      const etTi = -k0Over4Pi * (ETA0 * nTr + lTr);
+      const etPr = k0Over4Pi * (ETA0 * nPi - lPi);
+      const etPi = -k0Over4Pi * (ETA0 * nPr - lPr);
+      const u = (etTr * etTr + etTi * etTi + etPr * etPr + etPi * etPi) / (2 * ETA0);
+      uRow.push(u);
+    }
+    uGrid.push(uRow);
+  }
+
+  let radiatedPowerW = 0;
+  for (let ti = 0; ti < nTheta; ti += 1) {
+    const theta = ((thetaDeg[ti] ?? 0) * Math.PI) / 180;
+    const w = Math.sin(theta) * dTheta * dPhi;
+    const row = uGrid[ti] ?? [];
+    for (let pj = 0; pj < nPhi; pj += 1) radiatedPowerW += (row[pj] ?? 0) * w;
+  }
+  if (!(radiatedPowerW > 0) || !Number.isFinite(radiatedPowerW)) {
+    throw new Error("far-field power integral is non-positive or non-finite");
+  }
+
+  const toDbi = (x: number): number => (x > 0 ? 10 * Math.log10(x) : -400);
+  const gainDbi: number[][] = [];
+  const directivityDbi: number[][] = [];
+  let maxGainDbi = -Infinity;
+  let maxGainThetaDeg = 0;
+  let maxGainPhiDeg = 0;
+  let maxDirectivityDbi = -Infinity;
+  for (let ti = 0; ti < nTheta; ti += 1) {
+    const gRow: number[] = [];
+    const dRow: number[] = [];
+    const uRow = uGrid[ti] ?? [];
+    for (let pj = 0; pj < nPhi; pj += 1) {
+      const u = uRow[pj] ?? 0;
+      const gDbi = toDbi((4 * Math.PI * u) / acceptedPowerW);
+      const dDbi = toDbi((4 * Math.PI * u) / radiatedPowerW);
+      if (!Number.isFinite(gDbi) || !Number.isFinite(dDbi)) {
+        throw new Error("far-field pattern is non-finite");
+      }
+      gRow.push(gDbi);
+      dRow.push(dDbi);
+      if (gDbi > maxGainDbi) {
+        maxGainDbi = gDbi;
+        maxGainThetaDeg = thetaDeg[ti] ?? 0;
+        maxGainPhiDeg = phiDeg[pj] ?? 0;
+      }
+      if (dDbi > maxDirectivityDbi) maxDirectivityDbi = dDbi;
+    }
+    gainDbi.push(gRow);
+    directivityDbi.push(dRow);
+  }
+  return {
+    thetaDeg,
+    phiDeg,
+    gainDbi,
+    directivityDbi,
+    maxGainDbi,
+    maxGainThetaDeg,
+    maxGainPhiDeg,
+    maxDirectivityDbi,
+    radiatedPowerW,
+    acceptedPowerW,
+    radiationEfficiency: radiatedPowerW / acceptedPowerW,
+    timingMs: performance.now() - t0,
+  };
+}
+
 export interface FEMSolverInput {
   mesh: FEMMeshArtifact;
   frequencyHz: number;
   referenceImpedanceOhms: number;
   portPositive: Vec3;
   portNegative: Vec3;
+  /** When present, compute the far-field pattern via equivalent surface currents. */
+  farField?: FEMFarFieldOptions;
 }
 
 export type FEMSolverStatus = "ok" | "solver_error" | "non_finite";
@@ -1251,6 +1638,8 @@ export interface FEMSolverResult {
   iterationCount: number | null;
   converged: boolean;
   freeDofCount: number;
+  /** Far-field pattern; null when not requested, inapplicable, or failed. */
+  farField: FEMFarFieldResult | null;
   timingMs: { assembly: number; solve: number; post: number };
 }
 
@@ -1267,6 +1656,7 @@ export function solveFEMPoint(input: FEMSolverInput): FEMSolverResult {
     iterationCount: null as number | null,
     converged: false,
     freeDofCount: 0,
+    farField: null as FEMFarFieldResult | null,
     timingMs,
   };
   const fail = (status: FEMSolverStatus, message: string): FEMSolverResult => ({
@@ -1312,8 +1702,6 @@ export function solveFEMPoint(input: FEMSolverInput): FEMSolverResult {
       };
     }
     const v = portVoltage(input.mesh, system, feed, input.portNegative, kry.xRe, kry.xIm);
-    const t3 = performance.now();
-    timingMs.post = t3 - t2;
     // The impressed current is normalized to 1 A, so Zin = V.
     const zRe = v.re;
     const zIm = v.im;
@@ -1351,6 +1739,25 @@ export function solveFEMPoint(input: FEMSolverInput): FEMSolverResult {
         iterationCount: kry.iterations,
       };
     }
+    // Far-field is best-effort: impedance/S11 stay valid when it is skipped.
+    let farField: FEMFarFieldResult | null = null;
+    if (input.farField !== undefined && zRe > 0) {
+      try {
+        farField = computeFarField(
+          input.mesh,
+          system,
+          kry.xRe,
+          kry.xIm,
+          input.frequencyHz,
+          0.5 * zRe,
+          input.farField,
+        );
+      } catch {
+        farField = null;
+      }
+    }
+    const t3 = performance.now();
+    timingMs.post = t3 - t2;
     return {
       ...blank,
       status: "ok",
@@ -1360,6 +1767,7 @@ export function solveFEMPoint(input: FEMSolverInput): FEMSolverResult {
       residualNorm: kry.residualNorm,
       iterationCount: kry.iterations,
       converged: true,
+      farField,
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);

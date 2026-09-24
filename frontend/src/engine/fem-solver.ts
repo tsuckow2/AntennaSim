@@ -1625,6 +1625,12 @@ export interface FEMSolverInput {
   portNegative: Vec3;
   /** When present, compute the far-field pattern via equivalent surface currents. */
   farField?: FEMFarFieldOptions;
+  /**
+   * Relative BiCGSTAB convergence tolerance. Defaults to 1e-7 (the validated
+   * reference value). Larger models may use 1e-5..1e-6 to trade a small amount
+   * of accuracy for much shorter solves; the default is unchanged.
+   */
+  krylovTolerance?: number;
 }
 
 export type FEMSolverStatus = "ok" | "solver_error" | "non_finite";
@@ -1687,7 +1693,11 @@ export function solveFEMPoint(input: FEMSolverInput): FEMSolverResult {
     const omega = 2 * Math.PI * input.frequencyHz;
     const feed = selectGapFeed(input.mesh, system, input.portPositive, input.portNegative);
     const rhs = buildPortRhs(input.mesh, system, feed, omega);
-    const kry = bicgstab(matrix, rhs.re, rhs.im, 1e-7, 8000, "sgs");
+    const krylovTol =
+      input.krylovTolerance != null && Number.isFinite(input.krylovTolerance) && input.krylovTolerance > 0
+        ? input.krylovTolerance
+        : 1e-7;
+    const kry = bicgstab(matrix, rhs.re, rhs.im, krylovTol, 8000, "sgs");
     const t2 = performance.now();
     timingMs.assembly = t1 - t0;
     timingMs.solve = t2 - t1;

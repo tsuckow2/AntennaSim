@@ -25,7 +25,9 @@ import { validateModelIR } from "../dsl/model-ir";
  * Deliberate simplifications vs. the frozen text (documented, not silent):
  * - "Local edge length" for the port tolerance is approximated by the
  *   requested mesh size; grid snapping only ever makes cells smaller, so the
- *   resulting tolerance is conservative.
+ *   resulting tolerance is conservative. It is additionally capped at
+ *   0.25 * port length so a short port (e.g. a 1 mm probe feed) cannot
+ *   resolve the opposite terminal's conductor surface as its own.
  * - A material counts as a conductor when `conductivity_s_m >= 1e4`; a
  *   material counts as air-like for port candidacy when it is the airbox or
  *   has epsilon_r == 1, mu_r == 1 and no conductivity/loss.
@@ -446,11 +448,22 @@ export function buildFEMMesh(ir: ModelIR, meshSizeM: number, port?: FEMPortTermi
   let portPositiveFacets = new Uint32Array();
   let portNegativeFacets = new Uint32Array();
   if (port) {
+    // The port gap bounds the terminal tolerance: a terminal may legitimately
+    // sit within one port length of the opposite terminal's conductor face
+    // (e.g. a 1 mm probe feed over a ground plane), so the tolerance must be
+    // a fraction of the port length or the validator invents ambiguity.
+    const portLengthM = Math.hypot(
+      port.positive[0] - port.negative[0],
+      port.positive[1] - port.negative[1],
+      port.positive[2] - port.negative[2],
+    );
     const resolveTerminal = (terminal: Vec3, label: string): number[] => {
       // Tolerance per contract C: tol = max(1e-6 m, 0.25 * local edge length).
       // Local edge length is approximated by the requested mesh size; grid
       // snapping only ever makes cells smaller, so this is conservative.
-      const tol = Math.max(1e-6, 0.25 * meshSizeM);
+      // It is additionally capped at 0.25 * port length so a short lumped
+      // port cannot "see" the opposite terminal's conductor surface.
+      const tol = Math.max(1e-6, 0.25 * Math.min(meshSizeM, portLengthM));
       const tolSq = tol * tol;
       const facetDistanceSq = (f: number): number => {
         const a = vertexCoord(facetVerts[f * 3]!);

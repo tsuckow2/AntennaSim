@@ -208,6 +208,42 @@ describe("FEM mesh pipeline", () => {
     expect(() => buildFEMMesh(ir, 0.005, port)).toThrow(/invalid_port_ambiguous_contact/);
   });
 
+  it("resolves a short probe-feed port without false ambiguous contact", () => {
+    // Mirrors the 908 MHz patch example: a 1 mm probe gap above the ground
+    // plane with a 15 mm nominal mesh. The old mesh-size-only tolerance
+    // (3.75 mm) saw both the probe bottom and the ground top and threw
+    // invalid_port_ambiguous_contact.
+    const ir: ModelIR = {
+      version: 1,
+      paramSchemaVersion: 1,
+      materials: [{ name: "copper", epsilon_r: 1, mu_r: 1, conductivity_s_m: 5.8e7 }],
+      entities: [
+        { id: "ground", kind: "box", center: [0, 0, -0.001], size: [0.35, 0.35, 0.002], material: "copper" },
+        { id: "probe", kind: "box", center: [0, 0, 0.002], size: [0.004, 0.004, 0.002], material: "copper" },
+      ],
+      ports: [],
+      boundaries: [{ kind: "radiation", padding_m: 0.02 }],
+      meshHints: [],
+    };
+    const port = {
+      id: "port1",
+      positive: [0, 0, 0.001] as [number, number, number],
+      negative: [0, 0, 0] as [number, number, number],
+    };
+    const mesh = buildFEMMesh(ir, 0.015, port);
+    expect(mesh.portPositiveFacets.length).toBeGreaterThan(0);
+    expect(mesh.portNegativeFacets.length).toBeGreaterThan(0);
+    const positive = new Set(mesh.portPositiveFacets);
+    for (const facet of mesh.portNegativeFacets) expect(positive.has(facet)).toBe(false);
+    // Positive facets are on the probe bottom (z = 1 mm), negative on the ground top (z = 0).
+    const facetZ = (f: number) =>
+      (mesh.vertices[mesh.boundaryFacets[f * 3]! * 3 + 2]! +
+        mesh.vertices[mesh.boundaryFacets[f * 3 + 1]! * 3 + 2]! +
+        mesh.vertices[mesh.boundaryFacets[f * 3 + 2]! * 3 + 2]!) / 3;
+    for (const f of mesh.portPositiveFacets) expect(Math.abs(facetZ(f) - 0.001)).toBeLessThan(1e-9);
+    for (const f of mesh.portNegativeFacets) expect(Math.abs(facetZ(f))).toBeLessThan(1e-9);
+  });
+
   it("honors mesh hints with finer local subdivision", () => {
     const plain = buildFEMMesh(patchIR(), 0.01);
     const ir = patchIR();

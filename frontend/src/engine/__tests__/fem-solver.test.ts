@@ -392,4 +392,29 @@ describe("FEM H(curl) solver", () => {
     const relativeError = Math.abs(Math.sqrt(lambda) - kAnalytic) / kAnalytic;
     expect(relativeError).toBeLessThan(0.25);
   }, 120000);
+
+  it("keeps the default 908 MHz patch example within the reference solver's reach", async () => {
+    // Regression: a 5 mm patch refine hint doubled the free DOFs (98k -> 179k)
+    // and pushed BiCGSTAB past convergence. The example must stay small enough
+    // for the SGS-preconditioned solver to converge within the iteration cap.
+    const { readFileSync } = await import("node:fs");
+    const { executeParametricScript } = await import("../../dsl/executor");
+    const script = readFileSync(
+      new URL("../../dsl/examples/patch_908_directional.js", import.meta.url),
+      "utf8",
+    );
+    const exec = await executeParametricScript(script);
+    expect(exec.diagnostics).toHaveLength(0);
+    const port = exec.ir!.ports[0]!;
+    const mesh = buildFEMMesh(exec.ir!, 0.015, {
+      id: port.id as string,
+      positive: port.positive as Vec3,
+      negative: port.negative as Vec3,
+    });
+    const system = buildEdgeSystem(mesh);
+    // 98k DOFs converges in ~9.2k iterations; 179k did not converge at all.
+    // Keep a comfortable margin under the 250k hard cap.
+    expect(system.freeDofCount).toBeGreaterThan(0);
+    expect(system.freeDofCount).toBeLessThan(120000);
+  }, 120000);
 });

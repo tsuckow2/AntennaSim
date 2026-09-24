@@ -91,5 +91,8 @@ function buildModel(params, api) {
   });
 
   api.airbox({ padding_m: 0.06 });
-  api.refine({ region: "patch", max_size_m: 0.005 });
+  // Note: a finer patch refine hint was removed (2026-09-24). It doubled the
+  // free DOFs (98k -> 179k) and pushed the problem past what the TypeScript
+  // reference solver's SGS-preconditioned BiCGSTAB can converge. The uniform
+  // 15 mm mesh (lambda/22 at 908 MHz) solves in ~9k iterations.
 }

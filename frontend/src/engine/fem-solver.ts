@@ -1697,7 +1697,8 @@ export function solveFEMPoint(input: FEMSolverInput): FEMSolverResult {
       input.krylovTolerance != null && Number.isFinite(input.krylovTolerance) && input.krylovTolerance > 0
         ? input.krylovTolerance
         : 1e-7;
-    const kry = bicgstab(matrix, rhs.re, rhs.im, krylovTol, 8000, "sgs");
+    // The 908 MHz patch needs ~9.2k iterations at 98k DOFs; cap at 12k for headroom.
+    const kry = bicgstab(matrix, rhs.re, rhs.im, krylovTol, 12000, "sgs");
     const t2 = performance.now();
     timingMs.assembly = t1 - t0;
     timingMs.solve = t2 - t1;

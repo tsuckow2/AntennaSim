@@ -9,7 +9,7 @@
 import { create } from "zustand";
 import type { ScriptExecution } from "../dsl/executor";
 import { runParametricScript } from "../dsl/run-in-worker";
-import { getEngine } from "../engine";
+import { runBrowserFEM, cancelBrowserFEM } from "../engine/wasm";
 import {
   FEMRunAbortedError,
   validateFEMSweep,
@@ -150,13 +150,10 @@ export const useDslStore = create<DslState>((set, get) => ({
     const token = state.femRequestToken + 1;
     set({ femStatus: "running", femError: null, femRequestToken: token });
     try {
-      const engine = getEngine();
-      if (!engine.simulateFEM)
-        throw new Error("FEM is available only in the browser engine");
-      // The FEM worker prefers the native MFEM WASM solver and falls back to
-      // the TypeScript H(curl) reference solver (with a result warning) when
-      // the native module is not published.
-      const result = await engine.simulateFEM({
+      // FEM always runs in the browser via the FEM worker (native MFEM WASM
+      // first, TypeScript H(curl) fallback flagged in the result warnings),
+      // independent of the VITE_ENGINE selection used for NEC2 simulations.
+      const result = await runBrowserFEM({
         ...options,
         model_ir: modelIR as ModelIR,
       });
@@ -179,7 +176,7 @@ export const useDslStore = create<DslState>((set, get) => ({
     }
   },
   cancelFEM: () => {
-    getEngine().cancelFEM?.();
+    cancelBrowserFEM();
     set({ femStatus: "cancelled", femError: "FEM run cancelled" });
   },
 }));

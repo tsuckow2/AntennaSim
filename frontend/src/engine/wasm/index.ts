@@ -207,13 +207,68 @@ function ensureSimWorkerListener(): void {
 }
 
 // ---------------------------------------------------------------------------
+// Browser FEM entry points (engine-independent)
+// ---------------------------------------------------------------------------
+
+/**
+ * Run a FEM sweep directly in the browser via the FEM Web Worker.
+ *
+ * Engine-independent: the worker tries the native MFEM WASM solver first and
+ * falls back to the TypeScript H(curl) reference solver (flagged in the
+ * result warnings) when the native module is not published.  This works
+ * regardless of the VITE_ENGINE selection, so the parametric page can offer
+ * Run FEM even in backend builds.
+ */
+export function runBrowserFEM(
+  request: FEMSimulationRequest,
+): Promise<FEMSimulationResult> {
+  ensureFEMWorkerListener();
+  const id = generateId();
+  const generation = femWorkerGeneration;
+  const timeoutMs = Math.max(
+    MFEM_PER_POINT_TIMEOUT_MS,
+    request.steps * MFEM_PER_POINT_TIMEOUT_MS,
+  );
+  const message: FEMWorkerMessage = {
+    type: "fem_simulate",
+    id,
+    generation,
+    request,
+  };
+  return new Promise<FEMSimulationResult>((resolve, reject) => {
+    const timeoutId = setTimeout(() => {
+      const pending = pendingFEMRequests.get(id);
+      if (!pending || pending.generation !== generation) return;
+      rejectPendingFemRequestsAsAborted(
+        "timeout",
+        `FEM run timed out after ${timeoutMs} ms`,
+      );
+      resetFemWorker();
+    }, timeoutMs);
+    pendingFEMRequests.set(id, {
+      generation,
+      request,
+      resolve,
+      reject,
+      timeoutId,
+    });
+    getFemWorker().postMessage(message);
+  });
+}
+
+/** Cancel any in-flight browser FEM run. */
+export function cancelBrowserFEM(): void {
+  rejectPendingFemRequestsAsAborted("cancelled", "FEM run cancelled");
+  resetFemWorker();
+}
+
+// ---------------------------------------------------------------------------
 // WasmEngine
 // ---------------------------------------------------------------------------
 
 export class WasmEngine implements SimulationEngine {
   cancelFEM(): void {
-    rejectPendingFemRequestsAsAborted("cancelled", "FEM run cancelled");
-    resetFemWorker();
+    cancelBrowserFEM();
   }
 
   runMfemSmoke(): Promise<number> {
@@ -227,21 +282,7 @@ export class WasmEngine implements SimulationEngine {
   }
 
   async simulateFEM(request: FEMSimulationRequest): Promise<FEMSimulationResult> {
-    ensureFEMWorkerListener();
-    const id = generateId();
-    const generation = femWorkerGeneration;
-    const timeoutMs = Math.max(MFEM_PER_POINT_TIMEOUT_MS, request.steps * MFEM_PER_POINT_TIMEOUT_MS);
-    const message: FEMWorkerMessage = { type: "fem_simulate", id, generation, request };
-    return new Promise<FEMSimulationResult>((resolve, reject) => {
-      const timeoutId = setTimeout(() => {
-        const pending = pendingFEMRequests.get(id);
-        if (!pending || pending.generation !== generation) return;
-        rejectPendingFemRequestsAsAborted("timeout", `FEM run timed out after ${timeoutMs} ms`);
-        resetFemWorker();
-      }, timeoutMs);
-      pendingFEMRequests.set(id, { generation, request, resolve, reject, timeoutId });
-      getFemWorker().postMessage(message);
-    });
+    return runBrowserFEM(request);
   }
 
   /**

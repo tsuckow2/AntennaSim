@@ -12,14 +12,12 @@ import { runParametricScript } from "../dsl/run-in-worker";
 import { getEngine } from "../engine";
 import {
   FEMRunAbortedError,
-  MFEM_PRODUCTION_AVAILABLE,
-  MFEM_PRODUCTION_UNAVAILABLE_MESSAGE,
   validateFEMSweep,
   type FEMSimulationRequest,
   type FEMSimulationResult,
 } from "../engine/fem";
 import type { ModelIR } from "../dsl/model-ir";
-import PATCH_SRC from "../dsl/examples/patch_918_petg.js?raw";
+import PATCH_SRC from "../dsl/examples/patch_908_directional.js?raw";
 
 export type DslRunStatus = "idle" | "running" | "success" | "error";
 export type FemRunStatus =
@@ -154,8 +152,10 @@ export const useDslStore = create<DslState>((set, get) => ({
     try {
       const engine = getEngine();
       if (!engine.simulateFEM)
-        throw new Error("FEM is available only in the browser WASM engine");
-      if (!MFEM_PRODUCTION_AVAILABLE) throw new Error(MFEM_PRODUCTION_UNAVAILABLE_MESSAGE);
+        throw new Error("FEM is available only in the browser engine");
+      // The FEM worker prefers the native MFEM WASM solver and falls back to
+      // the TypeScript H(curl) reference solver (with a result warning) when
+      // the native module is not published.
       const result = await engine.simulateFEM({
         ...options,
         model_ir: modelIR as ModelIR,

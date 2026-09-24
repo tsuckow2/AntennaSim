@@ -20,7 +20,9 @@ export function FEMResultsPanel() {
     <section className="border-t border-border bg-surface p-3 overflow-y-auto max-h-[48%]">
       <div className="flex items-center justify-between gap-3 mb-2">
         <div>
-          <h2 className="text-xs font-semibold text-text-primary">MFEM FEM results</h2>
+          <h2 className="text-xs font-semibold text-text-primary">
+            FEM results <span className="font-normal text-text-secondary">· {fem.engine === "fem-typescript" ? "TypeScript H(curl) solver" : "MFEM WASM"}</span>
+          </h2>
           <p className="text-[11px] text-text-secondary">{fem.mesh.elements} elements, {fem.mesh.nodes} nodes, Z0 = {fem.reference_impedance_ohms} ohms</p>
         </div>
         <span className="text-[10px] text-swr-warning">{gainMessage}</span>

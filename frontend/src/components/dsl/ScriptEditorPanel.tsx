@@ -11,14 +11,13 @@ import { Button } from "../ui/Button";
 import { useDslStore } from "../../stores/dslStore";
 import type { ScriptDiagnostic } from "../../dsl/executor";
 import type { IRDiagnostic } from "../../dsl/model-ir";
-import { MFEM_PRODUCTION_AVAILABLE, MFEM_PRODUCTION_UNAVAILABLE_MESSAGE } from "../../engine/fem";
 
 function isScriptDiagnostic(d: ScriptDiagnostic | IRDiagnostic): d is ScriptDiagnostic {
   return "phase" in d;
 }
 
 export function ScriptEditorPanel() {
-  const [femSweep, setFemSweep] = useState({ start: 900, stop: 936, steps: 5, mesh: 0.005, z0: 50, portId: "" });
+  const [femSweep, setFemSweep] = useState({ start: 880, stop: 936, steps: 5, mesh: 0.015, z0: 50, portId: "" });
   const script = useDslStore((s) => s.script);
   const setScript = useDslStore((s) => s.setScript);
   const status = useDslStore((s) => s.status);
@@ -115,12 +114,11 @@ export function ScriptEditorPanel() {
           {isFemRunning ? (
             <Button size="sm" variant="danger" onClick={cancelFEM}>Cancel FEM</Button>
           ) : (
-            <Button size="sm" variant="secondary" disabled={!MFEM_PRODUCTION_AVAILABLE || !hasModel || isRunning || ports.length === 0} onClick={() => void runFEM({ start_mhz: femSweep.start, stop_mhz: femSweep.stop, steps: femSweep.steps, mesh_size_m: femSweep.mesh, reference_impedance_ohms: femSweep.z0, port_id: femSweep.portId || ports[0]?.id })}>Run FEM</Button>
+            <Button size="sm" variant="secondary" disabled={!hasModel || isRunning || ports.length === 0} onClick={() => void runFEM({ start_mhz: femSweep.start, stop_mhz: femSweep.stop, steps: femSweep.steps, mesh_size_m: femSweep.mesh, reference_impedance_ohms: femSweep.z0, port_id: femSweep.portId || ports[0]?.id })}>Run FEM</Button>
           )}
         </div>
         </div>
         {femStatus === "cancelled" && <p className="text-[11px] text-text-secondary">FEM run cancelled; previous result is stale.</p>}
-        {!MFEM_PRODUCTION_AVAILABLE && <p className="text-[11px] text-text-secondary">{MFEM_PRODUCTION_UNAVAILABLE_MESSAGE}</p>}
         {femError && <p className="text-[11px] text-swr-bad">{femError}</p>}
       </div>
     </div>

@@ -16,6 +16,8 @@ import { Canvas } from "@react-three/fiber";
 import { OrbitControls } from "@react-three/drei";
 import { Quaternion, Vector3 } from "three";
 import type { ModelIR, Material, Vec3 } from "../../dsl/model-ir";
+import type { PatternData } from "../../api/nec";
+import { RadiationPattern3D } from "../three/RadiationPattern3D";
 import { useUIStore } from "../../stores/uiStore";
 
 // ---------------------------------------------------------------------------
@@ -227,11 +229,44 @@ function EmptyState() {
 
 interface ModelIRPreviewProps {
   ir?: ModelIR;
+  /** Optional far-field pattern to overlay on the antenna (NEC PatternData shape). */
+  pattern?: PatternData | null;
 }
 
-export function ModelIRPreview({ ir }: ModelIRPreviewProps) {
+export function ModelIRPreview({ ir, pattern }: ModelIRPreviewProps) {
   const theme = useUIStore((s) => s.theme);
   const bg = theme === "dark" ? "#0A0A0F" : "#E8E8ED";
+
+  // Centroid and scale for the pattern overlay, from the IR entity bounds.
+  const { center, scale } = useMemo(() => {
+    if (!ir || ir.entities.length === 0) {
+      return { center: [0, 0, 0] as [number, number, number], scale: 0.1 };
+    }
+    let minX = Infinity, minY = Infinity, minZ = Infinity;
+    let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+    for (const entity of ir.entities) {
+      const c = entity.center;
+      // Expand by half-size to get bounds.
+      let hx = 0, hy = 0, hz = 0;
+      if (entity.kind === "box") {
+        hx = entity.size[0] / 2; hy = entity.size[1] / 2; hz = entity.size[2] / 2;
+      } else if (entity.kind === "sheetRect") {
+        hx = entity.size[0] / 2; hy = entity.size[1] / 2; hz = 0;
+      }
+      minX = Math.min(minX, c[0] - hx); maxX = Math.max(maxX, c[0] + hx);
+      minY = Math.min(minY, c[1] - hy); maxY = Math.max(maxY, c[1] + hy);
+      minZ = Math.min(minZ, c[2] - hz); maxZ = Math.max(maxZ, c[2] + hz);
+    }
+    const cx = (minX + maxX) / 2;
+    const cy = (minY + maxY) / 2;
+    const cz = (minZ + maxZ) / 2;
+    const span = Math.max(maxX - minX, maxY - minY, maxZ - minZ, 1e-6);
+    // IR (x,y,z) -> Three.js (x,z,-y).
+    return {
+      center: [cx, cz, -cy] as [number, number, number],
+      scale: span * 0.6,
+    };
+  }, [ir]);
 
   return (
     <div className="w-full h-full relative">
@@ -250,6 +285,16 @@ export function ModelIRPreview({ ir }: ModelIRPreviewProps) {
         <axesHelper args={[0.05]} />
 
         {ir ? <MaterialsMap ir={ir} /> : <EmptyState />}
+
+        {/* Far-field pattern overlay, centered on the antenna. */}
+        {pattern && (
+          <RadiationPattern3D
+            pattern={pattern}
+            scale={scale}
+            opacity={0.55}
+            center={center}
+          />
+        )}
       </Canvas>
 
       {!ir && (

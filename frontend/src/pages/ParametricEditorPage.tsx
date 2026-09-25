@@ -8,7 +8,7 @@
  *   [3D preview (flex-1)] [Bottom sheet: Script | Params | Diagnostics tabs]
  */
 
-import { useCallback, useEffect, useReducer, useRef } from "react";
+import { useCallback, useEffect, useMemo, useReducer, useRef } from "react";
 import { Navbar } from "../components/layout/Navbar";
 import { ErrorBoundary } from "../components/common/ErrorBoundary";
 import { ScriptEditorPanel } from "../components/dsl/ScriptEditorPanel";
@@ -17,6 +17,7 @@ import { ModelIRPreview } from "../components/dsl/ModelIRPreview";
 import { FEMResultsPanel } from "../components/dsl/FEMResultsPanel";
 import { SegmentedControl } from "../components/ui/SegmentedControl";
 import { useDslStore } from "../stores/dslStore";
+import { femGainPatternToNecPattern } from "../engine/fem";
 import type { ScriptDiagnostic } from "../dsl/executor";
 import type { IRDiagnostic } from "../dsl/model-ir";
 
@@ -34,6 +35,15 @@ export function ParametricEditorPage() {
   const runScript = useDslStore((s) => s.runScript);
   const result = useDslStore((s) => s.result);
   const status = useDslStore((s) => s.status);
+  const femResult = useDslStore((s) => s.femResult);
+
+  // First available far-field pattern, for the 3D overlay.
+  const overlayPattern = useMemo(() => {
+    const patterns = femResult?.gain_data?.patterns;
+    if (!patterns || patterns.length === 0) return null;
+    const first = patterns.find((p) => p.point_status === "ok") ?? patterns[0];
+    return first ? femGainPatternToNecPattern(first) : null;
+  }, [femResult]);
 
   // Mobile tab state (local to this page)
   const [mobileTab, setMobileTab] = useReducer(
@@ -89,7 +99,7 @@ export function ParametricEditorPage() {
         <main className="flex-1 relative min-w-0 min-h-0 flex flex-col">
           <div className="flex-1 min-h-0">
             <ErrorBoundary label="ModelIR Preview">
-              <ModelIRPreview ir={ir} />
+              <ModelIRPreview ir={ir} pattern={overlayPattern} />
             </ErrorBoundary>
           </div>
           <FEMResultsPanel />

@@ -1,7 +1,6 @@
 import { ImpedanceChart } from "../results/ImpedanceChart";
 import { SWRChart } from "../results/SWRChart";
 import { SmithChart } from "../results/SmithChart";
-import { FEMPattern3D } from "./FEMPattern3D";
 import { useDslStore } from "../../stores/dslStore";
 import { getFEMGainAvailabilityMessage, getRenderableFEMGainPoints, toNECFrequencyResults } from "../../engine/fem";
 
@@ -47,7 +46,7 @@ export function FEMResultsPanel() {
       </div>
       {fem.capabilities.gain && gainPoints.length > 0 && (
         <div className="mt-3">
-          <h3 className="text-xs font-semibold text-text-primary">Gain (native far-field)</h3>
+          <h3 className="text-xs font-semibold text-text-primary">Gain (native far-field) — overlaid on the 3D preview above</h3>
           <div className="mt-1 space-y-0.5">
             {gainPoints.slice(0, 5).map((point) => (
               <p key={point.frequency_mhz} className="text-[11px] text-text-secondary font-mono">
@@ -55,7 +54,6 @@ export function FEMResultsPanel() {
               </p>
             ))}
           </div>
-          <FEMPattern3D fem={fem} />
         </div>
       )}
       <p className="text-[11px] text-text-secondary mt-2">Resonant frequency: {fem.resonant_frequency_mhz === null ? "not available" : `${fem.resonant_frequency_mhz.toFixed(3)} MHz`}</p>

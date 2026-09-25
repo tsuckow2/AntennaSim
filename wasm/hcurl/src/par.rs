@@ -1,10 +1,11 @@
 //! Data-parallel loop abstraction.
 //!
 //! [`map_indexed`], [`for_each_indexed_mut`], [`sum_indexed`] and
-//! [`csum_indexed`] run on Rayon's thread pool on native targets and fall
-//! back to sequential iterators on `wasm32` (the WASM module is built without
-//! the atomics/SharedArrayBuffer threading setup, so the browser path stays
-//! single-threaded for now).
+//! [`csum_indexed`] run on Rayon's thread pool on native targets and on
+//! `wasm32` when the `wasm-threads` feature is enabled (the threaded browser
+//! build, where `initThreadPool` must have run before the first parallel
+//! op). Plain `wasm32` builds without the feature fall back to sequential
+//! iterators.
 //!
 //! Ordering guarantees:
 //!
@@ -21,7 +22,7 @@
 
 use num_complex::Complex64;
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(not(target_arch = "wasm32"), feature = "wasm-threads"))]
 use rayon::prelude::*;
 
 /// Ordered map over slice indices: `out[i] = f(i, &items[i])`.
@@ -34,11 +35,11 @@ where
     U: Send,
     F: Fn(usize, &T) -> U + Sync + Send,
 {
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-threads"))]
     {
         items.par_iter().enumerate().map(|(i, t)| f(i, t)).collect()
     }
-    #[cfg(target_arch = "wasm32")]
+    #[cfg(all(target_arch = "wasm32", not(feature = "wasm-threads")))]
     {
         items.iter().enumerate().map(|(i, t)| f(i, t)).collect()
     }
@@ -53,11 +54,11 @@ where
     T: Send,
     F: Fn(usize, &mut T) + Sync + Send,
 {
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-threads"))]
     {
         items.par_iter_mut().enumerate().for_each(|(i, t)| f(i, t));
     }
-    #[cfg(target_arch = "wasm32")]
+    #[cfg(all(target_arch = "wasm32", not(feature = "wasm-threads")))]
     {
         items.iter_mut().enumerate().for_each(|(i, t)| f(i, t));
     }
@@ -68,11 +69,11 @@ pub fn sum_indexed<F>(n: usize, f: F) -> f64
 where
     F: Fn(usize) -> f64 + Sync + Send,
 {
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-threads"))]
     {
         (0..n).into_par_iter().map(f).sum()
     }
-    #[cfg(target_arch = "wasm32")]
+    #[cfg(all(target_arch = "wasm32", not(feature = "wasm-threads")))]
     {
         (0..n).map(f).sum()
     }
@@ -84,11 +85,11 @@ where
     F: Fn(usize) -> Complex64 + Sync + Send,
 {
     let zero = Complex64::new(0.0, 0.0);
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-threads"))]
     {
         (0..n).into_par_iter().map(f).reduce(|| zero, |a, b| a + b)
     }
-    #[cfg(target_arch = "wasm32")]
+    #[cfg(all(target_arch = "wasm32", not(feature = "wasm-threads")))]
     {
         (0..n).map(f).fold(zero, |a, b| a + b)
     }

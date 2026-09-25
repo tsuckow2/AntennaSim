@@ -79,6 +79,11 @@ export interface FEMSimulationResult {
   simulation_id: string;
   engine: "hcurl-wasm" | "fem-typescript";
   computed_in_ms: number;
+  /**
+   * Rayon worker thread count used by a native H(curl) solve. Absent for the
+   * TypeScript fallback (and for results produced before this field existed).
+   */
+  threads?: number;
   mesh: FEMMeshArtifact["statistics"] & { warnings: string[] };
   reference_impedance_ohms: number;
   frequency_data: FEMFrequencyPoint[];

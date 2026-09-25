@@ -8,7 +8,7 @@
 
 use hcurl_fem::abi::{FarFieldBlob, PointRequest};
 use hcurl_fem::budget::Budget;
-use hcurl_fem::{assembly, edge, mesh};
+use hcurl_fem::{edge, mesh};
 
 fn load_request() -> PointRequest {
     let bytes = include_bytes!("fixtures/dipole_3ghz.req");

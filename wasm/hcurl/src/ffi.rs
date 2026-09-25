@@ -46,7 +46,7 @@ const LAST_ERROR_CAP: usize = 1024;
 static mut LAST_ERROR_BUF: [u8; LAST_ERROR_CAP] = [0; LAST_ERROR_CAP];
 static LAST_ERROR_LEN: AtomicUsize = AtomicUsize::new(0);
 
-fn install_panic_hook() {
+pub(crate) fn install_panic_hook() {
     static INSTALLED: AtomicBool = AtomicBool::new(false);
     if INSTALLED.swap(true, Ordering::SeqCst) {
         return;
@@ -152,7 +152,7 @@ pub extern "C" fn hcurl_solver_set_cancelled(flag: i32) {
     CANCELLED.store(flag != 0, Ordering::SeqCst);
 }
 
-fn run_point(req_bytes: &[u8]) -> Result<PointResponse> {
+pub(crate) fn run_point(req_bytes: &[u8]) -> Result<PointResponse> {
     let budget = Budget::new(&CANCELLED, SOLVE_TIMEOUT);
     let request = PointRequest::parse(req_bytes)?;
     crate::solve_point(&request, &budget)

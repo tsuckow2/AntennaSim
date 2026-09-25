@@ -30,7 +30,7 @@ export function FEMResultsPanel() {
       <div className="flex items-center justify-between gap-3 mb-2">
         <div>
           <h2 className="text-xs font-semibold text-text-primary">
-            FEM results <span className="font-normal text-text-secondary">· {fem.engine === "fem-typescript" ? "TypeScript H(curl) solver" : "Rust H(curl) WASM"}</span>
+            FEM results <span className="font-normal text-text-secondary">· {fem.engine === "fem-typescript" ? "TypeScript H(curl) solver" : `Rust H(curl) WASM${fem.threads && fem.threads > 1 ? ` · ${fem.threads} threads` : ""}`}</span>
           </h2>
           <p className="text-[11px] text-text-secondary">{fem.mesh.elements} elements, {fem.mesh.nodes} nodes, Z0 = {fem.reference_impedance_ohms} ohms</p>
         </div>

@@ -21,5 +21,18 @@ rayon = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = { version = "0.2", optional = true }
+wasm-bindgen-rayon = { version = "1", optional = true, features = ["no-bundler"] }
+
+[features]
+default = []
+# Threaded browser build. Enables the wasm-bindgen-rayon thread pool and the
+# #[wasm_bindgen] API surface in src/wasm_api.rs. Requires the nightly
+# atomics build documented in README.md ("Browser threads"); enabling it for
+# a plain wasm32 build without +atomics is a compile error (by design, from
+# wasm-bindgen-rayon). On non-wasm32 targets this feature is a no-op.
+wasm-threads = ["dep:wasm-bindgen", "dep:wasm-bindgen-rayon"]
+
 [profile.release]
 opt-level = 3

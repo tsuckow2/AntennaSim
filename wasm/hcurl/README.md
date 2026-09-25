@@ -150,13 +150,97 @@ cargo run --release --example dipole_bench
 RAYON_NUM_THREADS=1 cargo run --release --example dipole_bench
 ```
 
-On `wasm32` the `par` helpers compile to plain sequential iterators — the
-WASM module is built without the atomics/`SharedArrayBuffer` threading
-setup, so the browser module is unchanged and stays single-threaded.
-Enabling true WASM threads later needs no numerical-code changes (the
-kernels already go through `par`): build with
-`-C target-feature=+atomics`, initialize a `wasm-bindgen-rayon` thread
-pool from the JS loader, and serve COOP/COEP headers.
+On `wasm32` without the `wasm-threads` feature the `par` helpers compile to
+plain sequential iterators, so the default browser module stays
+single-threaded. The threaded browser build (next section) flips them to
+real Rayon threads with no numerical-code changes.
+
+## Browser threads
+
+The threaded browser build runs the same Rayon kernels inside the page via
+[`wasm-bindgen-rayon`](https://github.com/RReverser/wasm-bindgen-rayon)
+(Web Workers + `SharedArrayBuffer`). It needs all three of:
+
+1. **A nightly toolchain with rebuilt std.** WASM thread support needs
+   `std` itself compiled with the atomics target features (`-Z build-std`,
+   nightly-only). Pinned nightly `nightly-2025-11-15` is the tested one:
+   ```sh
+   rustup toolchain install nightly-2025-11-15 \
+     --target wasm32-unknown-unknown --component rust-src
+   ```
+2. **The `wasm-threads` cargo feature**, which enables the optional
+   `wasm-bindgen` / `wasm-bindgen-rayon` dependencies, the
+   `#[wasm_bindgen]` API in `src/wasm_api.rs`, and the Rayon branch of
+   `src/par.rs` on `wasm32`.
+3. **COOP/COEP response headers** on the serving host
+   (`Cross-Origin-Opener-Policy: same-origin` and
+   `Cross-Origin-Embedder-Policy: require-corp`), without which
+   `SharedArrayBuffer` is unavailable and the loader falls back to the
+   single-threaded module.
+
+Build with plain `cargo` plus the `wasm-bindgen` CLI (matching the
+`wasm-bindgen` crate version, here 0.2.128). `wasm-pack` is *not* used:
+its automatic `wasm-bindgen-cli` install inherits `RUSTFLAGS`, and the
+WASM linker flags then break the host build of the CLI.
+
+```sh
+# one-time: host tool for the JS glue (needs a C toolchain, takes a few min)
+cargo install --locked wasm-bindgen-cli --version 0.2.128
+
+# threaded module: nightly for -Z build-std, fresh target dir so the
+# atomics flags can't leak into other builds via cargo fingerprints
+CARGO_TARGET_DIR=target/mt \
+RUSTFLAGS='-C target-feature=+atomics,+bulk-memory \
+  -C link-arg=--shared-memory -C link-arg=--max-memory=1073741824 \
+  -C link-arg=--import-memory \
+  -C link-arg=--export=__wasm_init_tls -C link-arg=--export=__tls_size \
+  -C link-arg=--export=__tls_align -C link-arg=--export=__tls_base' \
+rustup run nightly-2025-11-15 cargo build --release \
+  --target wasm32-unknown-unknown --features wasm-threads \
+  -Z build-std=panic_abort,std
+
+# JS glue (--target web is required by wasm-bindgen-rayon)
+wasm-bindgen --target web --out-dir pkg-mt --out-name hcurl_solver_mt \
+  target/mt/wasm32-unknown-unknown/release/hcurl_fem.wasm
+# → pkg-mt/hcurl_solver_mt.js + pkg-mt/hcurl_solver_mt_bg.wasm (+ snippets/)
+```
+
+Copy `pkg-mt/hcurl_solver_mt.js`, `pkg-mt/hcurl_solver_mt_bg.wasm`, and the
+whole `pkg-mt/snippets/` tree to `frontend/public/wasm/` (the glue imports
+the `wasm-bindgen-rayon` worker bootstrap from `snippets/` via a relative
+path, so the layout must be preserved). Keep publishing the classic
+`hcurl_solver.js` / `hcurl_solver.wasm` alongside: the worker tries the
+threaded module first and falls back to the single-threaded one when
+threads are unavailable, then to the TypeScript solver.
+
+JS contract (see `frontend/src/engine/wasm/worker-fem.ts`):
+
+```js
+import init, { initThreadPool, hcurlSolvePoint } from './hcurl_solver_mt.js';
+await init(wasmUrl);
+await initThreadPool(navigator.hardwareConcurrency); // before any solve!
+const responseBytes = hcurlSolvePoint(requestBytes); // packed ABI v1
+```
+
+`initThreadPool` builds Rayon's *global* thread pool on worker-backed
+threads, so the `par` kernels pick it up with no further wiring. It must
+resolve before the first `hcurlSolvePoint` call — an earlier parallel op
+would otherwise build the default pool, which cannot spawn threads on
+wasm and aborts. The crate shares one `rayon` version with
+`wasm-bindgen-rayon` (check `cargo tree -i rayon`); two copies would
+silently split the pool.
+
+Caveats:
+
+- `panic=abort` is kept: a Rust panic traps the whole module (all pool
+  workers share the instance). The solver is `Result`-based, so panics
+  indicate bugs; the in-WASM panic hook still captures the message for
+  `hcurlLastError`.
+- `std::time::Instant` is unavailable on `wasm32` (unchanged); the
+  per-point wall-clock budget stays host-side in the worker watchdog.
+- Thread count: `navigator.hardwareConcurrency` workers are spawned as
+  nested workers inside the FEM Web Worker. Don't stack a second
+  frequency-level worker pool on top without sizing — oversubscription.
 
 ## API
 

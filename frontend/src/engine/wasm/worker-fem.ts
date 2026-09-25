@@ -1,7 +1,7 @@
 import { buildFEMMesh, FEM_ATTR_PORT_NEGATIVE, FEM_ATTR_PORT_POSITIVE } from "../mesh";
 import { adaptFEMFrequencyData, buildFEMFrequencies, HCURL_CAPABILITIES, selectFEMPort, type FEMPointStatus, type FEMSimulationRequest, type FEMSimulationResult } from "../fem";
 import { solveFEMPoint, type FEMSolverInput } from "../fem-solver";
-import type { HcurlSolverModule } from "./hcurl-module";
+import type { HcurlMtPackage, HcurlSolverModule } from "./hcurl-module";
 import { HCURL_ABI_VERSION, packHcurlPointRequest, unpackHcurlFarFieldBlob, unpackHcurlPointResponse } from "./hcurl-abi";
 
 export interface FEMWorkerMessage {
@@ -39,58 +39,129 @@ export interface FEMWorkerProgress {
 
 export type FEMWorkerResponse = FEMWorkerSuccess | FEMWorkerError | FEMWorkerProgress;
 
-type HcurlFactory = (options?: Record<string, unknown>) => Promise<HcurlSolverModule>;
-let factory: HcurlFactory | null = null;
+/** Emscripten-style raw exports of the classic single-threaded module. */
+interface HcurlClassicModule {
+  HEAPU8: Uint8Array;
+  _hcurl_solver_alloc(sizeBytes: number): number;
+  _hcurl_solver_free(ptr: number): void;
+  _hcurl_solver_set_cancelled?(flag: number): void;
+  _hcurl_solver_run(reqPtr: number, reqLen: number, rspPtrOut: number, rspLenOut: number): number;
+  _hcurl_solver_last_error(): string;
+}
 
-async function loadFactory(): Promise<HcurlFactory> {
-  if (factory) return factory;
+type HcurlClassicFactory = (options?: Record<string, unknown>) => Promise<HcurlClassicModule>;
+
+/**
+ * Threaded build: wasm-pack `--target web` glue plus the wasm-bindgen-rayon
+ * thread pool. Needs SharedArrayBuffer, i.e. a cross-origin-isolated page
+ * (COOP/COEP response headers, set in nginx).
+ */
+async function loadThreadedModule(): Promise<HcurlSolverModule> {
+  if (!crossOriginIsolated) {
+    throw new Error("page is not cross-origin isolated; the threaded solver needs COOP/COEP headers");
+  }
+  const base = import.meta.env.BASE_URL;
+  const pkg = (await import(/* @vite-ignore */ `${base}wasm/hcurl_solver_mt.js`)) as unknown as HcurlMtPackage;
+  // Pass the .wasm URL explicitly: the published glue file is renamed from
+  // the wasm-pack default, so the glue's built-in filename is stale.
+  await pkg.default(`${base}wasm/hcurl_solver_mt_bg.wasm`);
+  const threadCount = Math.max(1, navigator.hardwareConcurrency || 1);
+  // Spawns the Rayon worker pool; must resolve before the first solve call.
+  await pkg.initThreadPool(threadCount);
+  return {
+    solvePoint: (requestBytes) => pkg.hcurlSolvePoint(requestBytes),
+    setCancelled: (flag) => pkg.hcurlSetCancelled(flag),
+    lastError: () => pkg.hcurlLastError(),
+    threadCount,
+  };
+}
+
+/** Classic single-threaded build, adapted to the v2 module interface. */
+async function loadClassicModule(): Promise<HcurlSolverModule> {
   const base = import.meta.env.BASE_URL;
   const response = await fetch(`${base}wasm/hcurl_solver.js`);
   if (!response.ok) throw new Error(`Failed to fetch hcurl_solver.js (${response.status}). Build and publish the Rust H(curl) solver artifact (see wasm/hcurl/README.md).`);
   (0, eval)(await response.text());
-  const loaded = (self as unknown as Record<string, unknown>).createHcurlSolver as HcurlFactory | undefined;
-  if (!loaded) throw new Error("hcurl_solver.js loaded but createHcurlSolver was not found");
-  factory = loaded;
-  return loaded;
+  const factory = (self as unknown as Record<string, unknown>).createHcurlSolver as HcurlClassicFactory | undefined;
+  if (!factory) throw new Error("hcurl_solver.js loaded but createHcurlSolver was not found");
+  const raw = await factory({
+    locateFile: (path: string) => path.endsWith(".wasm") ? `${base}wasm/hcurl_solver.wasm` : path,
+  });
+  if (typeof raw._hcurl_solver_alloc !== "function" || typeof raw._hcurl_solver_run !== "function") {
+    throw new Error("Native H(curl) module is missing its solver exports");
+  }
+  const readU32 = (ptr: number): number => {
+    const heap = raw.HEAPU8;
+    return (heap[ptr] ?? 0)
+      | ((heap[ptr + 1] ?? 0) << 8)
+      | ((heap[ptr + 2] ?? 0) << 16)
+      | ((heap[ptr + 3] ?? 0) << 24);
+  };
+  return {
+    solvePoint(requestBytes: Uint8Array): Uint8Array {
+      const reqPtr = raw._hcurl_solver_alloc(requestBytes.byteLength);
+      const outSlotsPtr = raw._hcurl_solver_alloc(8);
+      if (!reqPtr || !outSlotsPtr) throw new Error("H(curl) solver failed to allocate request/output slots");
+      try {
+        raw.HEAPU8.set(requestBytes, reqPtr);
+        raw._hcurl_solver_run(reqPtr, requestBytes.byteLength, outSlotsPtr, outSlotsPtr + 4);
+        const rspPtr = readU32(outSlotsPtr);
+        const rspLen = readU32(outSlotsPtr + 4);
+        if (!rspPtr || !rspLen) {
+          const detail = raw._hcurl_solver_last_error();
+          throw new Error(`H(curl) solver returned an empty response${detail ? `: ${detail}` : ""}`);
+        }
+        const responseBytes = raw.HEAPU8.slice(rspPtr, rspPtr + rspLen);
+        raw._hcurl_solver_free(rspPtr);
+        return responseBytes;
+      } finally {
+        raw._hcurl_solver_free(reqPtr);
+        raw._hcurl_solver_free(outSlotsPtr);
+      }
+    },
+    setCancelled: (flag) => raw._hcurl_solver_set_cancelled?.(flag ? 1 : 0),
+    lastError: () => raw._hcurl_solver_last_error(),
+    threadCount: 1,
+  };
 }
 
-function readU32(module: HcurlSolverModule, ptr: number): number {
-  const heap = module.HEAPU8;
-  return (heap[ptr] ?? 0)
-    | ((heap[ptr + 1] ?? 0) << 8)
-    | ((heap[ptr + 2] ?? 0) << 16)
-    | ((heap[ptr + 3] ?? 0) << 24);
-}
+type NativeLoadResult =
+  | { module: HcurlSolverModule; error: null }
+  | { module: null; error: string };
 
-function assertModuleExports(module: HcurlSolverModule): void {
-  if (typeof module._hcurl_solver_alloc !== "function") throw new Error("Native H(curl) module is missing _hcurl_solver_alloc");
-  if (typeof module._hcurl_solver_free !== "function") throw new Error("Native H(curl) module is missing _hcurl_solver_free");
-  if (typeof module._hcurl_solver_run !== "function") throw new Error("Native H(curl) module is missing _hcurl_solver_run");
+/**
+ * Prefer the threaded Rust H(curl) module, fall back to the classic
+ * single-threaded module. The TypeScript reference solver remains the final
+ * fallback when neither native module loads.
+ */
+async function loadNativeModule(): Promise<NativeLoadResult> {
+  let threadedError: unknown = null;
+  try {
+    return { module: await loadThreadedModule(), error: null };
+  } catch (error) {
+    threadedError = error;
+  }
+  try {
+    return { module: await loadClassicModule(), error: null };
+  } catch (classicError) {
+    const detail = [
+      threadedError instanceof Error ? threadedError.message : String(threadedError),
+      classicError instanceof Error ? classicError.message : String(classicError),
+    ].join(" | ");
+    return { module: null, error: detail };
+  }
 }
 
 function invokePoint(
   module: HcurlSolverModule,
   requestBytes: Uint8Array,
 ): ReturnType<typeof unpackHcurlPointResponse> {
-  const reqPtr = module._hcurl_solver_alloc(requestBytes.byteLength);
-  const outSlotsPtr = module._hcurl_solver_alloc(8);
-  if (!reqPtr || !outSlotsPtr) throw new Error("H(curl) solver failed to allocate request/output slots");
-  try {
-    module.HEAPU8.set(requestBytes, reqPtr);
-    const status = module._hcurl_solver_run(reqPtr, requestBytes.byteLength, outSlotsPtr, outSlotsPtr + 4);
-    const rspPtr = readU32(module, outSlotsPtr);
-    const rspLen = readU32(module, outSlotsPtr + 4);
-    if (!rspPtr || !rspLen) {
-      const detail = module._hcurl_solver_last_error();
-      throw new Error(`H(curl) solver returned empty response pointer/length (status ${status})${detail ? `: ${detail}` : ""}`);
-    }
-    const responseBytes = module.HEAPU8.slice(rspPtr, rspPtr + rspLen);
-    module._hcurl_solver_free(rspPtr);
-    return unpackHcurlPointResponse(responseBytes);
-  } finally {
-    module._hcurl_solver_free(reqPtr);
-    module._hcurl_solver_free(outSlotsPtr);
+  const responseBytes = module.solvePoint(requestBytes);
+  if (!responseBytes || responseBytes.byteLength === 0) {
+    const detail = module.lastError();
+    throw new Error(`H(curl) solver returned an empty response${detail ? `: ${detail}` : ""}`);
   }
+  return unpackHcurlPointResponse(responseBytes);
 }
 
 type FEMProgressCallback = (
@@ -111,18 +182,18 @@ async function solve(
   const startedAt = performance.now();
   onProgress(0, frequencies.length, "loading-native");
 
-  // Prefer the native Rust H(curl) module when it is published; otherwise
-  // fall back to the TypeScript H(curl) reference solver so FEM keeps working.
+  // Prefer the threaded native Rust H(curl) module, then the classic
+  // single-threaded one; otherwise fall back to the TypeScript H(curl)
+  // reference solver so FEM keeps working.
   let module: HcurlSolverModule | null = null;
   let nativeError: string | null = null;
-  try {
-    const loaded = await (await loadFactory())({
-      locateFile: (path: string) => path.endsWith(".wasm") ? `${import.meta.env.BASE_URL}wasm/hcurl_solver.wasm` : path,
-    });
-    assertModuleExports(loaded);
-    module = loaded;
-  } catch (error) {
-    nativeError = error instanceof Error ? error.message : String(error);
+  let threadCount: number | null = null;
+  const nativeLoad = await loadNativeModule();
+  if (nativeLoad.module) {
+    module = nativeLoad.module;
+    threadCount = nativeLoad.module.threadCount;
+  } else {
+    nativeError = nativeLoad.error;
   }
 
   const toPoint = (
@@ -342,6 +413,9 @@ async function solve(
     simulation_id: `hcurl-${Date.now().toString(36)}`,
     engine,
     computed_in_ms: Math.round(performance.now() - startedAt),
+    // Rayon worker thread count for native solves; absent for the
+    // TypeScript fallback.
+    ...(threadCount !== null ? { threads: threadCount } : {}),
     mesh: {
       ...mesh.statistics,
       warnings: [...mesh.warnings],

@@ -34,11 +34,14 @@
 //! - [`krylov`] — complex BiCGSTAB + symmetric Gauss–Seidel
 //! - [`port`] — gap source, V/I extraction, S11
 //! - [`farfield`] — Stratton–Chu near-to-far-field transform
-//! - [`par`] — data-parallel loops (Rayon natively, sequential on wasm32)
+//! - [`par`] — data-parallel loops (Rayon natively and on wasm32 with the
+//!   `wasm-threads` feature, sequential otherwise)
 //! - [`solve`] — end-to-end single-point orchestration
 //! - [`csr`] — complex compressed-sparse-row matrix
 //! - [`abi`] — packed binary request/response wire format (v1)
 //! - [`ffi`] — `extern "C"` exports for the WASM module
+//! - `wasm_api` — `#[wasm_bindgen]` exports for the threaded browser build
+//!   (`wasm-threads` feature)
 //! - [`budget`] — cooperative cancellation + wall-clock timeout
 //! - [`error`] — error types
 //!
@@ -75,6 +78,10 @@ pub mod mesh;
 pub mod par;
 pub mod port;
 pub mod solve;
+/// `#[wasm_bindgen]` API for the threaded browser build (`wasm-threads`
+/// feature). The plain single-threaded WASM module uses [`ffi`] instead.
+#[cfg(all(target_arch = "wasm32", feature = "wasm-threads"))]
+pub mod wasm_api;
 
 pub use abi::{PointRequest, PointResponse};
 pub use csr::CsrMatrix;
@@ -87,3 +94,9 @@ pub use error::{Error, Result};
 /// it takes a validated [`PointRequest`] and a [`Budget`], and returns a
 /// [`PointResponse`] ready for [`PointResponse::serialize`].
 pub use solve::solve_point;
+
+// Threaded browser build only: re-exported per the wasm-bindgen-rayon README
+// so the generated JS glue exposes `initThreadPool(n)`. JS must await it
+// after `init()` and before any solve call.
+#[cfg(all(target_arch = "wasm32", feature = "wasm-threads"))]
+pub use wasm_bindgen_rayon::init_thread_pool;

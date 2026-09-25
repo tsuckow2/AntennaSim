@@ -48,6 +48,8 @@ export interface Boundary {
 export interface MeshHint {
   region: string;
   max_size_m: number;
+  /** Optional per-axis overrides; axes not listed fall back to max_size_m. */
+  max_size_by_axis_m?: { x?: number; y?: number; z?: number };
 }
 
 export interface ModelIR {
@@ -135,6 +137,13 @@ export function validateModelIR(ir: unknown): IRDiagnostic[] {
   (value.meshHints as MeshHint[]).forEach((hint, i) => {
     if (!hint.region || !ids.has(hint.region) && hint.region !== "airbox") errors.push(diagnostic(`meshHints[${i}].region`, "references an unknown region"));
     if (!finite(hint.max_size_m) || hint.max_size_m <= 0) errors.push(diagnostic(`meshHints[${i}].max_size_m`, "must be > 0"));
+    const byAxis = hint.max_size_by_axis_m;
+    if (byAxis !== undefined) {
+      for (const axis of ["x", "y", "z"] as const) {
+        const v = byAxis[axis];
+        if (v !== undefined && (!finite(v) || v <= 0)) errors.push(diagnostic(`meshHints[${i}].max_size_by_axis_m.${axis}`, "must be > 0"));
+      }
+    }
   });
   (value.boundaries as Boundary[]).forEach((boundary, i) => {
     if (boundary.kind !== "radiation" && boundary.kind !== "pml") errors.push(diagnostic(`boundaries[${i}].kind`, "must be radiation or pml"));

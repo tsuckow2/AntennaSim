@@ -278,6 +278,29 @@ describe("FEM mesh pipeline", () => {
     expect(refined.statistics.nodes).toBeGreaterThan(plain.statistics.nodes);
   });
 
+  it("honors per-axis mesh hints without refining the other axes", () => {
+    const zOnly = patchIR();
+    zOnly.meshHints = [{ region: "substrate", max_size_m: 0.01, max_size_by_axis_m: { z: 0.0005 } }];
+    const mesh = buildFEMMesh(zOnly, 0.01);
+    const distinct = (mesh: FEMMeshArtifact, component: number, lo: number, hi: number): Set<number> => {
+      const planes = new Set<number>();
+      for (let v = 0; v < mesh.statistics.nodes; v += 1) {
+        const c = mesh.vertices[v * 3 + component]!;
+        if (c >= lo - 1e-12 && c <= hi + 1e-12) planes.add(Math.round(c * 1e9));
+      }
+      return planes;
+    };
+    // 2 mm substrate at 0.5 mm z-size -> 4 layers -> 5 planes through the slab.
+    expect(distinct(mesh, 2, -0.001, 0.001).size).toBe(5);
+    // x grid untouched by the z-only hint.
+    const plain = buildFEMMesh(patchIR(), 0.01);
+    expect(distinct(mesh, 0, -Infinity, Infinity).size).toBe(distinct(plain, 0, -Infinity, Infinity).size);
+    // An isotropic hint on the same region refines far more aggressively.
+    const iso = patchIR();
+    iso.meshHints = [{ region: "substrate", max_size_m: 0.0005 }];
+    expect(buildFEMMesh(iso, 0.01).statistics.nodes).toBeGreaterThan(mesh.statistics.nodes * 2);
+  });
+
   it("leaves port facet sets empty with a warning when no port is given", () => {
     const mesh = buildFEMMesh(patchIR(), 0.005);
     expect(mesh.portPositiveFacets.length).toBe(0);

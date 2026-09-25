@@ -322,7 +322,8 @@ export function buildFEMMesh(ir: ModelIR, meshSizeM: number, port?: FEMPortTermi
   // no interval exceeds the requested size (or an applicable mesh hint).
   // Zero-thickness sheets contribute their normal plane plus their in-plane
   // footprint boundaries, so sheet facets align exactly with the footprint.
-  const hintByRegion = new Map(ir.meshHints.map((hint) => [hint.region, hint.max_size_m]));
+  const hintByRegion = new Map(ir.meshHints.map((hint) => [hint.region, hint]));
+  const axisName = ["x", "y", "z"] as const;
   const planes: number[][] = [[], [], []];
   for (let axis = 0 as 0 | 1 | 2; axis < 3; axis += 1) {
     const faceSet = new Set<number>(allBoxes.flatMap((box) => [box.min[axis], box.max[axis]]));
@@ -346,7 +347,10 @@ export function buildFEMMesh(ir: ModelIR, meshSizeM: number, port?: FEMPortTermi
       for (const box of allBoxes) {
         const hint = hintByRegion.get(box.id);
         if (hint != null && box.min[axis]! <= a + COORD_SNAP_M && box.max[axis]! >= b - COORD_SNAP_M) {
-          required = Math.min(required, hint);
+          // Per-axis override lets thin slabs (e.g. substrates) refine only
+          // through their thickness without exploding the in-plane grid.
+          const axisSize = hint.max_size_by_axis_m?.[axisName[axis]] ?? hint.max_size_m;
+          required = Math.min(required, axisSize);
         }
       }
       const count = Math.max(1, Math.ceil((b - a) / required - 1e-9));

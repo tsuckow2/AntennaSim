@@ -1,9 +1,9 @@
 /**
  * TypeScript reference H(curl) finite-element solver for the FEM pipeline.
  *
- * This module implements the same single-frequency driven formulation the
- * production native MFEM solver is specified against, so it can act as a
- * validated fallback inside worker-fem while the native `mfem_solver`
+ * This module implements the same single-frequency driven formulation as
+ * the native Rust H(curl) solver (`wasm/hcurl`), so it can act as a
+ * validated fallback inside worker-fem when the native `hcurl_solver`
  * artifact is unpublished:
  *
  *   curl( (1/mu_r) curl E ) - k0^2 eps_c E = -j omega mu0 J_imp   in the air/dielectric volume

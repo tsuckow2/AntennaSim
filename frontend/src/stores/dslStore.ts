@@ -158,7 +158,7 @@ export const useDslStore = create<DslState>((set, get) => ({
     const token = state.femRequestToken + 1;
     set({ femStatus: "running", femError: null, femProgress: null, femRequestToken: token });
     try {
-      // FEM always runs in the browser via the FEM worker (native MFEM WASM
+      // FEM always runs in the browser via the FEM worker (native hcurl WASM
       // first, TypeScript H(curl) fallback flagged in the result warnings),
       // independent of the VITE_ENGINE selection used for NEC2 simulations.
       const result = await runBrowserFEM(

@@ -5,10 +5,6 @@ import type { FrequencyResult } from "../api/nec";
 
 export type FEMPointStatus = "ok" | "non_finite" | "solver_error" | "cancelled" | "timeout";
 
-export const MFEM_PRODUCTION_AVAILABLE = false;
-export const MFEM_PRODUCTION_UNAVAILABLE_MESSAGE =
-  "Production MFEM solver is not available yet; use Run MFEM Smoke to validate the WASM build.";
-
 export interface FEMGainPoint {
   frequency_mhz: number;
   point_status: FEMPointStatus;
@@ -70,7 +66,7 @@ export interface FEMSimulationRequest {
   /**
    * Far-field request for the TypeScript fallback solver. When omitted the
    * fallback computes a 5-degree pattern per frequency point; set enabled to
-   * false to skip it. Ignored by the native MFEM path.
+   * false to skip it. Ignored by the native hcurl path.
    */
   far_field?: {
     enabled: boolean;
@@ -81,7 +77,7 @@ export interface FEMSimulationRequest {
 
 export interface FEMSimulationResult {
   simulation_id: string;
-  engine: "mfem-wasm" | "fem-typescript";
+  engine: "hcurl-wasm" | "fem-typescript";
   computed_in_ms: number;
   mesh: FEMMeshArtifact["statistics"] & { warnings: string[] };
   reference_impedance_ohms: number;
@@ -213,7 +209,7 @@ export function validateFEMSweep(startMhz: number, stopMhz: number, steps: numbe
   if (!Number.isInteger(steps) || steps < 1 || steps > 201) throw new Error("FEM UI sweeps must contain between 1 and 201 points");
 }
 
-export const MFEM_CAPABILITIES: FEMSimulationResult["capabilities"] = {
+export const HCURL_CAPABILITIES: FEMSimulationResult["capabilities"] = {
   impedance: true,
   s11: true,
   swr: true,
@@ -255,8 +251,8 @@ export function createStatusOnlyFEMResult(
     })),
   );
   return {
-    simulation_id: `mfem-${status}-${Date.now().toString(36)}`,
-    engine: "mfem-wasm",
+    simulation_id: `hcurl-${status}-${Date.now().toString(36)}`,
+    engine: "hcurl-wasm",
     computed_in_ms: 0,
     mesh: {
       nodes: 0,
@@ -274,7 +270,7 @@ export function createStatusOnlyFEMResult(
       available: false,
       message: "Gain unavailable for this FEM run.",
     },
-    capabilities: MFEM_CAPABILITIES,
+    capabilities: HCURL_CAPABILITIES,
   };
 }
 

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { type FEMSimulationRequest, type FEMSimulationResult, MFEM_CAPABILITIES } from "../../fem";
+import { type FEMSimulationRequest, type FEMSimulationResult, HCURL_CAPABILITIES } from "../../fem";
 import type { FEMWorkerMessage, FEMWorkerResponse } from "../worker-fem";
 
 class MockWorker {
@@ -63,7 +63,7 @@ const request: FEMSimulationRequest = {
 
 const okResult: FEMSimulationResult = {
   simulation_id: "sim",
-  engine: "mfem-wasm",
+  engine: "hcurl-wasm",
   computed_in_ms: 1,
   mesh: { nodes: 1, elements: 1, min_quality: 1, material_count: 1, boundary_count: 0, warnings: [] },
   reference_impedance_ohms: 50,
@@ -79,7 +79,7 @@ const okResult: FEMSimulationResult = {
   }],
   resonant_frequency_mhz: 900,
   warnings: [],
-  capabilities: MFEM_CAPABILITIES,
+  capabilities: HCURL_CAPABILITIES,
 };
 
 describe("WasmEngine FEM cancellation/timeout coordinator", () => {

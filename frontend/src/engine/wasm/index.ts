@@ -26,7 +26,6 @@ import { exportMaa } from "../parsers/maa-export";
 import { buildCardDeck } from "../parsers/nec-input";
 import { FEMRunAbortedError, createStatusOnlyFEMResult, type FEMSimulationRequest, type FEMSimulationResult } from "../fem";
 import type { FEMWorkerMessage, FEMWorkerResponse } from "./worker-fem";
-import type { MfemSmokeRequest, MfemSmokeResponse } from "./worker-mfem";
 import type {
   WorkerRequest,
   WorkerResponse,
@@ -52,7 +51,7 @@ const FEM_POINT_TIMEOUT_MS = 15 * 60 * 1000;
 export interface FEMProgressInfo {
   pointIndex: number;
   pointsTotal: number;
-  stage: "meshing" | "loading-mfem" | "solving";
+  stage: "meshing" | "loading-native" | "solving";
 }
 
 // ---------------------------------------------------------------------------
@@ -62,7 +61,6 @@ export interface FEMProgressInfo {
 let simWorker: Worker | null = null;
 let optWorker: Worker | null = null;
 let femWorker: Worker | null = null;
-let mfemWorker: Worker | null = null;
 let femWorkerGeneration = 0;
 
 function getSimWorker(): Worker {
@@ -100,11 +98,6 @@ function resetFemWorker(): void {
   getFemWorker();
 }
 
-function getMfemWorker(): Worker {
-  if (!mfemWorker) mfemWorker = new Worker(new URL("./worker-mfem.ts", import.meta.url), { type: "module" });
-  return mfemWorker;
-}
-
 // ---------------------------------------------------------------------------
 // Pending request tracking
 // ---------------------------------------------------------------------------
@@ -131,8 +124,6 @@ const pendingFEMRequests = new Map<string, {
   onProgress?: (progress: FEMProgressInfo) => void;
 }>();
 let femWorkerListenerAttached = false;
-const pendingMfemSmokeRequests = new Map<string, { resolve: (trueDofs: number) => void; reject: (error: Error) => void }>();
-let mfemWorkerListenerAttached = false;
 
 function ensureFEMWorkerListener(): void {
   if (femWorkerListenerAttached) return;
@@ -197,24 +188,6 @@ function resetFemWatchdog(id: string): void {
   pending.timeoutId = createFemWatchdog(id);
 }
 
-function ensureMfemWorkerListener(): void {
-  if (mfemWorkerListenerAttached) return;
-  mfemWorkerListenerAttached = true;
-  getMfemWorker().addEventListener("message", (event: MessageEvent<MfemSmokeResponse>) => {
-    const pending = pendingMfemSmokeRequests.get(event.data.id);
-    if (!pending) return;
-    pendingMfemSmokeRequests.delete(event.data.id);
-    if (event.data.type === "success") pending.resolve(event.data.trueDofs);
-    else pending.reject(new Error(event.data.message));
-  });
-  getMfemWorker().addEventListener("error", (event) => {
-    const error = new Error(`MFEM worker error: ${event.message}`);
-    for (const [id, pending] of pendingMfemSmokeRequests) { pending.reject(error); pendingMfemSmokeRequests.delete(id); }
-    mfemWorker = null;
-    mfemWorkerListenerAttached = false;
-  });
-}
-
 // ---------------------------------------------------------------------------
 // Worker message handlers (set up lazily)
 // ---------------------------------------------------------------------------
@@ -259,9 +232,9 @@ function ensureSimWorkerListener(): void {
 /**
  * Run a FEM sweep directly in the browser via the FEM Web Worker.
  *
- * Engine-independent: the worker tries the native MFEM WASM solver first and
- * falls back to the TypeScript H(curl) reference solver (flagged in the
- * result warnings) when the native module is not published.  This works
+ * Engine-independent: the worker tries the native Rust H(curl) WASM solver
+ * first and falls back to the TypeScript H(curl) reference solver (flagged
+ * in the result warnings) when the native module is not published.  This works
  * regardless of the VITE_ENGINE selection, so the parametric page can offer
  * Run FEM even in backend builds.
  */
@@ -304,16 +277,6 @@ export function cancelBrowserFEM(): void {
 export class WasmEngine implements SimulationEngine {
   cancelFEM(): void {
     cancelBrowserFEM();
-  }
-
-  runMfemSmoke(): Promise<number> {
-    ensureMfemWorkerListener();
-    const id = generateId();
-    const message: MfemSmokeRequest = { type: "mfem_smoke", id };
-    return new Promise<number>((resolve, reject) => {
-      pendingMfemSmokeRequests.set(id, { resolve, reject });
-      getMfemWorker().postMessage(message);
-    });
   }
 
   async simulateFEM(request: FEMSimulationRequest): Promise<FEMSimulationResult> {

@@ -8,7 +8,7 @@ import {
   FEM_ATTR_PORT_POSITIVE,
   type FEMMeshArtifact,
 } from "../mesh";
-import { packMfemPointRequest } from "../wasm/mfem-abi";
+import { packHcurlPointRequest } from "../wasm/hcurl-abi";
 
 // Copper patch on an FR4 substrate, floating in a generated air volume.
 function patchIR(): ModelIR {
@@ -140,7 +140,7 @@ describe("FEM mesh pipeline", () => {
     portAttr.fill(FEM_ATTR_PORT_POSITIVE, 0, mesh.portPositiveFacets.length);
     portAttr.fill(FEM_ATTR_PORT_NEGATIVE, mesh.portPositiveFacets.length);
     expect(() =>
-      packMfemPointRequest({
+      packHcurlPointRequest({
         frequencyHz: 918e6,
         vertices: mesh.vertices,
         tets: mesh.tetrahedra,

@@ -1,0 +1,24 @@
+[package]
+name = "hcurl-fem"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.74"
+description = "H(curl) finite-element solver for time-harmonic electromagnetics: first-order Nedelec edge elements, complex BiCGSTAB with symmetric Gauss-Seidel preconditioning, Silver-Muller absorbing boundary, Stratton-Chu far field. Compiles to WebAssembly for in-browser simulation."
+license = "GPL-3.0-or-later"
+repository = "https://github.com/EA1FUO/AntennaSim"
+homepage = "https://github.com/EA1FUO/AntennaSim"
+documentation = "https://github.com/EA1FUO/AntennaSim/tree/main/wasm/hcurl"
+keywords = ["fem", "electromagnetics", "hcurl", "nedelec", "wasm"]
+categories = ["science", "wasm"]
+
+[lib]
+name = "hcurl_fem"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+num-complex = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+opt-level = 3

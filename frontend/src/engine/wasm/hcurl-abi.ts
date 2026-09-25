@@ -1,11 +1,11 @@
 import type { FEMPointStatus } from "../fem";
 
-export const MFEM_ABI_VERSION = 1;
-export const MFEM_REQUEST_HEADER_BYTES = 128;
-export const MFEM_RESPONSE_HEADER_BYTES = 104;
-export const MFEM_ENDIANNESS_SENTINEL = 0x12345678;
+export const HCURL_ABI_VERSION = 1;
+export const HCURL_REQUEST_HEADER_BYTES = 128;
+export const HCURL_RESPONSE_HEADER_BYTES = 104;
+export const HCURL_ENDIANNESS_SENTINEL = 0x12345678;
 
-export const MFEM_LIMITS = {
+export const HCURL_LIMITS = {
   maxVertices: 350000,
   maxTets: 2000000,
   maxPoints: 201,
@@ -13,10 +13,10 @@ export const MFEM_LIMITS = {
   perFrequencyTimeoutMs: 30000,
 } as const;
 
-export type MfemNativeStatusCode = 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8;
+export type HcurlNativeStatusCode = 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8;
 
-export interface MfemPointResponse {
-  statusCode: MfemNativeStatusCode;
+export interface HcurlPointResponse {
+  statusCode: HcurlNativeStatusCode;
   pointStatus: FEMPointStatus;
   pointMessage?: string;
   residualNorm: number | null;
@@ -31,7 +31,7 @@ export interface MfemPointResponse {
   fieldBlob: Uint8Array | null;
 }
 
-export interface MfemPointRequest {
+export interface HcurlPointRequest {
   frequencyHz: number;
   vertices: Float64Array;
   tets: Uint32Array;
@@ -64,7 +64,7 @@ function finiteOrNull(value: number): number | null {
   return Number.isFinite(value) ? value : null;
 }
 
-function mapPointStatus(code: MfemNativeStatusCode, nonFinite: boolean): FEMPointStatus {
+function mapPointStatus(code: HcurlNativeStatusCode, nonFinite: boolean): FEMPointStatus {
   if (nonFinite) return "non_finite";
   switch (code) {
     case 0:
@@ -89,10 +89,10 @@ function utf8Bytes(value: string): Uint8Array {
   return new TextEncoder().encode(value);
 }
 
-export function packMfemPointRequest(payload: MfemPointRequest): Uint8Array {
+export function packHcurlPointRequest(payload: HcurlPointRequest): Uint8Array {
   if (!Number.isFinite(payload.frequencyHz) || payload.frequencyHz <= 0) throw new Error("frequency_hz must be a positive finite value");
-  if (payload.vertices.length / 3 > MFEM_LIMITS.maxVertices) throw new Error(`vertex_count exceeds ${MFEM_LIMITS.maxVertices}`);
-  if (payload.tets.length / 4 > MFEM_LIMITS.maxTets) throw new Error(`tet_count exceeds ${MFEM_LIMITS.maxTets}`);
+  if (payload.vertices.length / 3 > HCURL_LIMITS.maxVertices) throw new Error(`vertex_count exceeds ${HCURL_LIMITS.maxVertices}`);
+  if (payload.tets.length / 4 > HCURL_LIMITS.maxTets) throw new Error(`tet_count exceeds ${HCURL_LIMITS.maxTets}`);
 
   const verticesBytes = new Uint8Array(payload.vertices.buffer, payload.vertices.byteOffset, payload.vertices.byteLength);
   const tetsBytes = new Uint8Array(payload.tets.buffer, payload.tets.byteOffset, payload.tets.byteLength);
@@ -128,7 +128,7 @@ export function packMfemPointRequest(payload: MfemPointRequest): Uint8Array {
   if (portPosCount === 0 || portNegCount === 0) throw new Error("port facet sets must contain positive and negative facets");
   if (materialTableBytes.byteLength === 0) throw new Error("material_table must contain at least one material record");
 
-  const totalBytes = MFEM_REQUEST_HEADER_BYTES
+  const totalBytes = HCURL_REQUEST_HEADER_BYTES
     + verticesBytes.byteLength
     + tetsBytes.byteLength
     + tetRegionBytes.byteLength
@@ -140,12 +140,12 @@ export function packMfemPointRequest(payload: MfemPointRequest): Uint8Array {
     + portNegBytes.byteLength
     + portAttrBytes.byteLength;
 
-  if (totalBytes > MFEM_LIMITS.maxRequestBytes) throw new Error(`request exceeds ${MFEM_LIMITS.maxRequestBytes} bytes`);
+  if (totalBytes > HCURL_LIMITS.maxRequestBytes) throw new Error(`request exceeds ${HCURL_LIMITS.maxRequestBytes} bytes`);
 
   const buffer = new Uint8Array(totalBytes);
   const view = new DataView(buffer.buffer);
 
-  let offset = MFEM_REQUEST_HEADER_BYTES;
+  let offset = HCURL_REQUEST_HEADER_BYTES;
   const verticesOffset = offset;
   offset = writeBytes(buffer, offset, verticesBytes);
   const tetsOffset = offset;
@@ -167,8 +167,8 @@ export function packMfemPointRequest(payload: MfemPointRequest): Uint8Array {
   const portAttrOffset = offset;
   writeBytes(buffer, offset, portAttrBytes);
 
-  view.setUint32(0, MFEM_ABI_VERSION, true);
-  view.setUint32(4, MFEM_ENDIANNESS_SENTINEL, true);
+  view.setUint32(0, HCURL_ABI_VERSION, true);
+  view.setUint32(4, HCURL_ENDIANNESS_SENTINEL, true);
   view.setUint32(8, 0, true);
   view.setFloat64(16, payload.frequencyHz, true);
   view.setUint32(24, vertexCount, true);
@@ -201,13 +201,13 @@ export function packMfemPointRequest(payload: MfemPointRequest): Uint8Array {
   return buffer;
 }
 
-export function unpackMfemPointResponse(raw: Uint8Array): MfemPointResponse {
-  if (raw.byteLength < MFEM_RESPONSE_HEADER_BYTES) throw new Error("MFEM response is smaller than fixed header");
+export function unpackHcurlPointResponse(raw: Uint8Array): HcurlPointResponse {
+  if (raw.byteLength < HCURL_RESPONSE_HEADER_BYTES) throw new Error("H(curl) response is smaller than fixed header");
   const view = new DataView(raw.buffer, raw.byteOffset, raw.byteLength);
   const abiVersion = view.getUint32(0, true);
-  if (abiVersion !== MFEM_ABI_VERSION) throw new Error(`Unsupported MFEM ABI version in response: ${abiVersion}`);
+  if (abiVersion !== HCURL_ABI_VERSION) throw new Error(`Unsupported H(curl) ABI version in response: ${abiVersion}`);
 
-  const statusCode = view.getUint32(4, true) as MfemNativeStatusCode;
+  const statusCode = view.getUint32(4, true) as HcurlNativeStatusCode;
   const residualNorm = view.getFloat64(16, true);
   const iterationCount = view.getUint32(24, true);
   const zinRealOhms = view.getFloat64(32, true);
@@ -246,5 +246,89 @@ export function unpackMfemPointResponse(raw: Uint8Array): MfemPointResponse {
     timingSolveMs: finiteOrNull(timingSolveMs),
     timingPostMs: finiteOrNull(timingPostMs),
     fieldBlob,
+  };
+}
+
+/** Far-field blob format version produced by the Rust H(curl) solver. */
+export const HCURL_FAR_FIELD_BLOB_VERSION = 1;
+
+/** Decoded Stratton-Chu far-field pattern from a native point response. */
+export interface HcurlFarFieldPattern {
+  thetaDeg: number[];
+  phiDeg: number[];
+  /** Row-major [theta][phi] IEEE gain grid in dBi. */
+  gainDbi: number[][];
+  /** Row-major [theta][phi] directivity grid in dBi. */
+  directivityDbi: number[][];
+  maxGainDbi: number;
+  maxGainThetaDeg: number;
+  maxGainPhiDeg: number;
+  maxDirectivityDbi: number;
+  radiatedPowerW: number;
+  acceptedPowerW: number;
+  radiationEfficiency: number;
+}
+
+/**
+ * Decode the `field_blob` of a native point response (far-field blob v1).
+ *
+ * Wire layout (little-endian):
+ *   u32 version (=1), u32 n_theta, u32 n_phi,
+ *   7x f64: max_gain_dbi, max_gain_theta_deg, max_gain_phi_deg,
+ *           max_directivity_dbi, radiated_power_w, accepted_power_w,
+ *           radiation_efficiency,
+ *   n_theta f64 theta_deg, n_phi f64 phi_deg,
+ *   (n_theta*n_phi) f64 gain_dbi row-major, then directivity_dbi row-major.
+ *
+ * Throws on version mismatch, truncation, or non-finite payload values.
+ */
+export function unpackHcurlFarFieldBlob(blob: Uint8Array): HcurlFarFieldPattern {
+  const minBytes = 12 + 7 * 8;
+  if (blob.byteLength < minBytes) throw new Error("Far-field blob is smaller than its header");
+  const view = new DataView(blob.buffer, blob.byteOffset, blob.byteLength);
+  const version = view.getUint32(0, true);
+  if (version !== HCURL_FAR_FIELD_BLOB_VERSION) {
+    throw new Error(`Unsupported far-field blob version: ${version}`);
+  }
+  const nTheta = view.getUint32(4, true);
+  const nPhi = view.getUint32(8, true);
+  if (nTheta === 0 || nPhi === 0 || nTheta > 1024 || nPhi > 4096) {
+    throw new Error(`Far-field blob grid dimensions out of range: ${nTheta}x${nPhi}`);
+  }
+  const expected = minBytes + (nTheta + nPhi + 2 * nTheta * nPhi) * 8;
+  if (blob.byteLength < expected) throw new Error("Far-field blob is truncated");
+
+  let offset = 12;
+  const readF64 = (): number => {
+    const value = view.getFloat64(offset, true);
+    offset += 8;
+    return value;
+  };
+  const scalars = Array.from({ length: 7 }, readF64);
+  const [maxGainDbi, maxGainThetaDeg, maxGainPhiDeg, maxDirectivityDbi, radiatedPowerW, acceptedPowerW, radiationEfficiency] = scalars as [number, number, number, number, number, number, number];
+  const thetaDeg = Array.from({ length: nTheta }, readF64);
+  const phiDeg = Array.from({ length: nPhi }, readF64);
+  const readGrid = (): number[][] => {
+    const grid: number[][] = [];
+    for (let t = 0; t < nTheta; t++) {
+      const row: number[] = [];
+      for (let p = 0; p < nPhi; p++) row.push(readF64());
+      grid.push(row);
+    }
+    return grid;
+  };
+  const gainDbi = readGrid();
+  const directivityDbi = readGrid();
+
+  const finite = (v: number): boolean => Number.isFinite(v);
+  const allFinite = [maxGainDbi, maxGainThetaDeg, maxGainPhiDeg, maxDirectivityDbi, radiatedPowerW, acceptedPowerW, radiationEfficiency, ...thetaDeg, ...phiDeg].every(finite)
+    && gainDbi.every((row) => row.every(finite))
+    && directivityDbi.every((row) => row.every(finite));
+  if (!allFinite) throw new Error("Far-field blob contains non-finite values");
+
+  return {
+    thetaDeg, phiDeg, gainDbi, directivityDbi,
+    maxGainDbi, maxGainThetaDeg, maxGainPhiDeg, maxDirectivityDbi,
+    radiatedPowerW, acceptedPowerW, radiationEfficiency,
   };
 }

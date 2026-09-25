@@ -7,7 +7,7 @@ import {
   femGainPatternToNecPattern,
   getFEMGainAvailabilityMessage,
   getRenderableFEMGainPoints,
-  MFEM_CAPABILITIES,
+  HCURL_CAPABILITIES,
   selectFEMPort,
   toNECFrequencyResults,
   validateFEMSweep,
@@ -82,14 +82,14 @@ describe("browser FEM contract", () => {
     ]);
     const chartData = toNECFrequencyResults({
       simulation_id: "sim",
-      engine: "mfem-wasm",
+      engine: "hcurl-wasm",
       computed_in_ms: 1,
       mesh: { nodes: 1, elements: 1, min_quality: 1, material_count: 1, boundary_count: 0, warnings: [] },
       reference_impedance_ohms: 50,
       frequency_data,
       resonant_frequency_mhz: 918,
       warnings: [],
-      capabilities: MFEM_CAPABILITIES,
+      capabilities: HCURL_CAPABILITIES,
     });
     expect(chartData).toHaveLength(1);
     expect(Number.isNaN(chartData[0]!.gain_max_dbi)).toBe(true);
@@ -132,8 +132,8 @@ describe("browser FEM contract", () => {
   it("keeps the first UI sweep bounded and capabilities honest", () => {
     expect(() => validateFEMSweep(900, 936, 202)).toThrow(/201/);
     expect(buildFEMFrequencies(900, 936, 5)).toHaveLength(5);
-    expect(MFEM_CAPABILITIES.gain).toBe(false);
-    expect(MFEM_CAPABILITIES.far_field).toBe(false);
+    expect(HCURL_CAPABILITIES.gain).toBe(false);
+    expect(HCURL_CAPABILITIES.far_field).toBe(false);
   });
 
   it("converts FEM far-field patterns to NEC PatternData for the 3D view", () => {

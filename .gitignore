@@ -56,3 +56,4 @@ frontend/public/wasm/nec2c.wasm
 # Misc
 *.bak
 *.tmp
+pkg-mt/

@@ -1,4 +1,4 @@
-import type { BoxEntity, Material, ModelIR, Vec3 } from "../dsl/model-ir";
+import type { BoxEntity, Material, ModelIR, SheetRectEntity, Vec3 } from "../dsl/model-ir";
 import { validateModelIR } from "../dsl/model-ir";
 
 /**
@@ -7,7 +7,9 @@ import { validateModelIR } from "../dsl/model-ir";
  * Implements frozen contracts B (mesh artifact v1) and C (port mapping) from
  * docs/mfem-wasm-simulation-results-plan.md:
  *
- * - Box-only geometry. `sheetRect` is rejected with an explicit diagnostic.
+ * - Box and zero-thickness `sheetRect` geometry. Sheets must be conductive
+ *   (PEC) and axis-aligned; they contribute a grid plane plus footprint
+ *   boundaries, and their interior facets are tagged as conductor PEC.
  * - The outer air volume is generated from `ModelIR.boundaries[*].padding_m`
  *   (largest padding wins); a missing boundary fails with `missing_air_domain`.
  * - All boxes are placed on one tensor-product grid whose planes are snapped to
@@ -89,13 +91,32 @@ export interface FEMMeshArtifact {
   warnings: string[];
 }
 
-interface MeshedBox {
+export interface MeshedBox {
   id: string;
   min: Vec3;
   max: Vec3;
   attribute: number;
   conductor: boolean;
   airLike: boolean;
+}
+
+/**
+ * A zero-thickness PEC sheet (sheetRect entity).
+ * - axis: the normal axis (0=x, 1=y, 2=z).
+ * - plane: coordinate along the normal axis.
+ * - uAxis/uMin/uMax, vAxis/vMin/vMax: in-plane extents.
+ * Only axis-aligned sheets of conductive material are supported.
+ */
+export interface MeshedSheet {
+  id: string;
+  axis: 0 | 1 | 2;
+  plane: number;
+  uAxis: 0 | 1 | 2;
+  uMin: number;
+  uMax: number;
+  vAxis: 0 | 1 | 2;
+  vMin: number;
+  vMax: number;
 }
 
 const snap = (value: number): number => Math.round(value / COORD_SNAP_M) * COORD_SNAP_M;
@@ -126,6 +147,34 @@ function boxFromEntity(entity: BoxEntity, attribute: number, material: Material)
     conductor: isConductor(material),
     airLike: isAirLikeMaterial(material),
   };
+}
+
+/**
+ * Convert a sheetRect entity to a MeshedSheet.
+ * Only axis-aligned normals (±x, ±y, ±z) and conductive materials are supported.
+ * The in-plane axes (u, v) are the two axes orthogonal to the normal, in
+ * ascending axis order (e.g. normal=z → u=x, v=y). size=[su, sv] maps to
+ * [u extent, v extent].
+ */
+function sheetFromEntity(entity: SheetRectEntity, material: Material): MeshedSheet {
+  if (!isConductor(material)) {
+    throw new Error(`sheetRect ${entity.id} uses non-conductor material ${entity.material}; sheets must be conductive (PEC)`);
+  }
+  const n = entity.normal;
+  let axis: 0 | 1 | 2;
+  if (n[0] === 1 || n[0] === -1) axis = 0;
+  else if (n[1] === 1 || n[1] === -1) axis = 1;
+  else if (n[2] === 1 || n[2] === -1) axis = 2;
+  else throw new Error(`sheetRect ${entity.id} has non-axis-aligned normal [${n}]; only ±x, ±y, ±z are supported`);
+  const axes = [0, 1, 2].filter((a) => a !== axis) as [0 | 1 | 2, 0 | 1 | 2];
+  const uAxis = axes[0]!;
+  const vAxis = axes[1]!;
+  const plane = snap(entity.center[axis]);
+  const uMin = snap(entity.center[uAxis]! - entity.size[0]! / 2);
+  const uMax = snap(entity.center[uAxis]! + entity.size[0]! / 2);
+  const vMin = snap(entity.center[vAxis]! - entity.size[1]! / 2);
+  const vMax = snap(entity.center[vAxis]! + entity.size[1]! / 2);
+  return { id: entity.id, axis, plane, uAxis, uMin, uMax, vAxis, vMin, vMax };
 }
 
 function buildMaterialTable(entries: FEMMeshMaterialEntry[]): Uint8Array {
@@ -197,11 +246,12 @@ export function buildFEMMesh(ir: ModelIR, meshSizeM: number, port?: FEMPortTermi
   const firstError = diagnostics.find((item) => item.severity === "error");
   if (firstError) throw new Error(`Invalid ModelIR: ${firstError.path} ${firstError.message}`);
   if (!Number.isFinite(meshSizeM) || meshSizeM <= 0) throw new Error("mesh_size_m must be a positive finite value");
-  if (ir.entities.some((entity) => entity.kind === "sheetRect")) {
-    throw new Error("Volume FEM does not support sheetRect; use finite-thickness box entities");
+  const boxEntities = ir.entities.filter((entity): entity is BoxEntity => entity.kind === "box");
+  const sheetEntities = ir.entities.filter((entity): entity is SheetRectEntity => entity.kind === "sheetRect");
+  if (boxEntities.length === 0 && sheetEntities.length === 0) {
+    throw new Error("Volume FEM requires at least one box or sheetRect entity");
   }
-  const entities = ir.entities.filter((entity): entity is BoxEntity => entity.kind === "box");
-  if (entities.length === 0) throw new Error("Volume FEM requires at least one box entity");
+  const entities = boxEntities;
 
   const materialByName = new Map(ir.materials.map((material) => [material.name, material]));
   const sortedNames = [...materialByName.keys()].sort();
@@ -210,6 +260,11 @@ export function buildFEMMesh(ir: ModelIR, meshSizeM: number, port?: FEMPortTermi
     const material = materialByName.get(entity.material);
     if (!material) throw new Error(`Unknown material for box ${entity.id}: ${entity.material}`);
     return boxFromEntity(entity, attributeByMaterial.get(entity.material)!, material);
+  });
+  const sheets: MeshedSheet[] = sheetEntities.map((entity) => {
+    const material = materialByName.get(entity.material);
+    if (!material) throw new Error(`Unknown material for sheetRect ${entity.id}: ${entity.material}`);
+    return sheetFromEntity(entity, material);
   });
 
   for (let left = 0; left < boxes.length; left += 1) {
@@ -226,13 +281,23 @@ export function buildFEMMesh(ir: ModelIR, meshSizeM: number, port?: FEMPortTermi
   }
   const padding = Math.max(...ir.boundaries.map((boundary) => boundary.padding_m));
 
-  // Explicit outer air volume enclosing every solid region.
+  // Explicit outer air volume enclosing every solid region and sheet.
   const airMin: Vec3 = [Infinity, Infinity, Infinity];
   const airMax: Vec3 = [-Infinity, -Infinity, -Infinity];
   for (const box of boxes) {
     for (let axis = 0 as 0 | 1 | 2; axis < 3; axis += 1) {
       airMin[axis] = Math.min(airMin[axis], box.min[axis]!);
       airMax[axis] = Math.max(airMax[axis], box.max[axis]!);
+    }
+  }
+  for (const sheet of sheets) {
+    const axes = [sheet.axis, sheet.uAxis, sheet.vAxis] as const;
+    const mins = [sheet.plane, sheet.uMin, sheet.vMin] as const;
+    const maxs = [sheet.plane, sheet.uMax, sheet.vMax] as const;
+    for (let i = 0; i < 3; i += 1) {
+      const axis = axes[i]!;
+      airMin[axis] = Math.min(airMin[axis]!, mins[i]!);
+      airMax[axis] = Math.max(airMax[axis]!, maxs[i]!);
     }
   }
   const airBox: MeshedBox = {
@@ -255,10 +320,24 @@ export function buildFEMMesh(ir: ModelIR, meshSizeM: number, port?: FEMPortTermi
 
   // Tensor-product grid: planes snapped to every box face, then subdivided so
   // no interval exceeds the requested size (or an applicable mesh hint).
+  // Zero-thickness sheets contribute their normal plane plus their in-plane
+  // footprint boundaries, so sheet facets align exactly with the footprint.
   const hintByRegion = new Map(ir.meshHints.map((hint) => [hint.region, hint.max_size_m]));
   const planes: number[][] = [[], [], []];
   for (let axis = 0 as 0 | 1 | 2; axis < 3; axis += 1) {
-    const faces = [...new Set(allBoxes.flatMap((box) => [box.min[axis], box.max[axis]]))].sort((x, y) => x - y);
+    const faceSet = new Set<number>(allBoxes.flatMap((box) => [box.min[axis], box.max[axis]]));
+    for (const sheet of sheets) {
+      if (sheet.axis === axis) faceSet.add(sheet.plane);
+      if (sheet.uAxis === axis) {
+        faceSet.add(sheet.uMin);
+        faceSet.add(sheet.uMax);
+      }
+      if (sheet.vAxis === axis) {
+        faceSet.add(sheet.vMin);
+        faceSet.add(sheet.vMax);
+      }
+    }
+    const faces = [...faceSet].sort((x, y) => x - y);
     const axisPlanes: number[] = [];
     for (let i = 0; i < faces.length - 1; i += 1) {
       const a = faces[i]!;
@@ -442,6 +521,46 @@ export function buildFEMMesh(ir: ModelIR, meshSizeM: number, port?: FEMPortTermi
   }
   if (nonAirExterior) {
     warnings.push("A non-air material reaches the airbox exterior; the absorbing boundary was applied anyway.");
+  }
+
+  // Zero-thickness PEC sheets: tag facets lying on the sheet plane within the
+  // sheet footprint as conductor PEC. These are interior facets (shared by two
+  // tets) that the volume classification above skips; the solver's PEC edge
+  // elimination applies to them exactly like conductor-volume surfaces.
+  // Facets must be fully inside the footprint (all three vertices), not just
+  // centroid-inside, since the grid planes now align with footprint edges.
+  const SHEET_PLANE_TOL_M = 1e-9;
+  for (const sheet of sheets) {
+    let tagged = 0;
+    for (let f = 0; f < facetCount; f += 1) {
+      if (boundaryIndexOfFacet[f] !== -1) continue; // Already tagged (e.g. probe contact).
+      const va = vertexCoord(facetVerts[f * 3]!);
+      const vb = vertexCoord(facetVerts[f * 3 + 1]!);
+      const vc = vertexCoord(facetVerts[f * 3 + 2]!);
+      if (
+        Math.abs(va[sheet.axis]! - sheet.plane) > SHEET_PLANE_TOL_M ||
+        Math.abs(vb[sheet.axis]! - sheet.plane) > SHEET_PLANE_TOL_M ||
+        Math.abs(vc[sheet.axis]! - sheet.plane) > SHEET_PLANE_TOL_M
+      ) {
+        continue;
+      }
+      // All vertices must lie within the footprint (with tolerance).
+      const inside = (v: Vec3): boolean =>
+        v[sheet.uAxis]! >= sheet.uMin - SHEET_PLANE_TOL_M &&
+        v[sheet.uAxis]! <= sheet.uMax + SHEET_PLANE_TOL_M &&
+        v[sheet.vAxis]! >= sheet.vMin - SHEET_PLANE_TOL_M &&
+        v[sheet.vAxis]! <= sheet.vMax + SHEET_PLANE_TOL_M;
+      if (!inside(va) || !inside(vb) || !inside(vc)) continue;
+      boundaryIndexOfFacet[f] = boundaryFacets.length / 3;
+      boundaryFacets.push(facetVerts[f * 3]!, facetVerts[f * 3 + 1]!, facetVerts[f * 3 + 2]!);
+      boundaryAttributes.push(FEM_ATTR_CONDUCTOR_PEC);
+      facetIsConductorAir[f] = true;
+      facetIsSurface[f] = true;
+      tagged += 1;
+    }
+    if (tagged === 0) {
+      warnings.push(`sheetRect ${sheet.id} tagged no mesh facets; it may lie outside the meshed volume or miss the grid planes.`);
+    }
   }
 
   // Port terminal -> facet-set mapping per contract C.

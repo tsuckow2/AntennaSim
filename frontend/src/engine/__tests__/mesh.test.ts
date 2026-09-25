@@ -170,14 +170,40 @@ describe("FEM mesh pipeline", () => {
     expect(() => buildFEMMesh(ir, 0.005)).toThrow(/missing_air_domain/);
   });
 
-  it("rejects surface sheets and overlapping volumes before MFEM", () => {
+  it("rejects overlapping volumes before MFEM", () => {
     const ir = patchIR();
-    expect(() =>
-      buildFEMMesh({ ...ir, entities: [{ id: "sheet", kind: "sheetRect", center: [0, 0, 0], size: [0.01, 0.01], normal: [0, 0, 1], material: "copper" }] }, 0.005),
-    ).toThrow(/sheetRect/);
     expect(() =>
       buildFEMMesh({ ...ir, entities: [ir.entities[0]!, { ...ir.entities[0]!, id: "copy" }] }, 0.005),
     ).toThrow(/Overlapping/);
+  });
+
+  it("meshes a zero-thickness PEC sheetRect as conductor facets", () => {
+    const ir = patchIR();
+    // Replace the 1 mm copper patch box with a zero-thickness PEC sheet.
+    ir.entities = [
+      ir.entities[0]!,
+      { id: "patch", kind: "sheetRect", center: [0, 0, 0.002], size: [0.012, 0.012], normal: [0, 0, 1], material: "copper" },
+    ];
+    const mesh = buildFEMMesh(ir, 0.005);
+    // No copper volume region: only airbox (1) and fr4 (1001).
+    expect(regionHistogram(mesh)).toEqual(new Map([[1, 2766], [1001, 150]]));
+    // The sheet contributes PEC boundary facets on the z=0.002 plane.
+    let pecOnSheet = 0;
+    for (let f = 0; f < mesh.boundaryFacets.length / 3; f += 1) {
+      if (mesh.boundaryAttributes[f] !== FEM_ATTR_CONDUCTOR_PEC) continue;
+      const z0 = mesh.vertices[mesh.boundaryFacets[f * 3]! * 3 + 2]!;
+      const z1 = mesh.vertices[mesh.boundaryFacets[f * 3 + 1]! * 3 + 2]!;
+      const z2 = mesh.vertices[mesh.boundaryFacets[f * 3 + 2]! * 3 + 2]!;
+      if (Math.abs(z0 - 0.002) < 1e-9 && Math.abs(z1 - 0.002) < 1e-9 && Math.abs(z2 - 0.002) < 1e-9) pecOnSheet += 1;
+    }
+    expect(pecOnSheet).toBeGreaterThan(0);
+  });
+
+  it("rejects a non-conductor sheetRect", () => {
+    const ir = patchIR();
+    expect(() =>
+      buildFEMMesh({ ...ir, entities: [{ id: "sheet", kind: "sheetRect", center: [0, 0, 0], size: [0.01, 0.01], normal: [0, 0, 1], material: "fr4" }] }, 0.005),
+    ).toThrow(/non-conductor/);
   });
 
   it("reports invalid_port_no_contact for a terminal floating in air", () => {

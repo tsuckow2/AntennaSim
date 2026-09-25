@@ -17,7 +17,7 @@ function isScriptDiagnostic(d: ScriptDiagnostic | IRDiagnostic): d is ScriptDiag
 }
 
 export function ScriptEditorPanel() {
-  const [femSweep, setFemSweep] = useState({ start: 880, stop: 936, steps: 5, mesh: 0.015, z0: 50, portId: "" });
+  const [femSweep, setFemSweep] = useState({ start: 880, stop: 936, steps: 1, mesh: 0.015, z0: 50, portId: "" });
   const script = useDslStore((s) => s.script);
   const setScript = useDslStore((s) => s.setScript);
   const status = useDslStore((s) => s.status);

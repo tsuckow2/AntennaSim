@@ -58,20 +58,20 @@ fn cdiv(a: Complex64, b: Complex64) -> Complex64 {
 }
 
 fn norm2(v: &[Complex64]) -> f64 {
-    v.iter().map(|z| z.norm_sqr()).sum::<f64>().sqrt()
+    // Pool-ordered reduction: a few ulps of drift vs the serial sum, well
+    // inside the dipole parity tolerances.
+    crate::par::sum_indexed(v.len(), |k| v[k].norm_sqr()).sqrt()
 }
 
 /// Hermitian inner product `Σ conj(aₖ)·bₖ`.
+///
+/// The parallel reduction order is pool-defined (see [`norm2`]).
 fn dot_conj(a: &[Complex64], b: &[Complex64]) -> Complex64 {
-    let mut sr = 0.0;
-    let mut si = 0.0;
-    for k in 0..a.len() {
+    crate::par::csum_indexed(a.len(), |k| {
         let (a1, a2) = (a[k].re, a[k].im);
         let (b1, b2) = (b[k].re, b[k].im);
-        sr += a1 * b1 + a2 * b2;
-        si += a1 * b2 - a2 * b1;
-    }
-    Complex64::new(sr, si)
+        Complex64::new(a1 * b1 + a2 * b2, a1 * b2 - a2 * b1)
+    })
 }
 
 struct PreconditionerData {
@@ -169,14 +169,13 @@ pub fn bicgstab(
     assert_eq!(matrix.ncols(), n, "BiCGSTAB requires a square matrix");
     assert_eq!(b.len(), n, "RHS dimension mismatch");
 
-    let done = |iterations: u32, residual_norm: f64, converged: bool, x: Vec<Complex64>| {
-        KrylovResult {
+    let done =
+        |iterations: u32, residual_norm: f64, converged: bool, x: Vec<Complex64>| KrylovResult {
             x,
             iterations,
             residual_norm,
             converged,
-        }
-    };
+        };
 
     let b_norm = norm2(b);
     if !(b_norm > 0.0) || !b_norm.is_finite() {
@@ -208,29 +207,32 @@ pub fn bicgstab(
             return Ok(done(iter, norm2(&r) / b_norm, false, x));
         }
         let beta = cdiv(rho, rho_prev) * cdiv(alpha, omega);
-        for k in 0..n {
-            p[k] = r[k] + beta * (p[k] - omega * v[k]);
-        }
+        // Each k is independent: disjoint writes, bit-identical to serial.
+        crate::par::for_each_indexed_mut(&mut p, |k, pk| {
+            *pk = r[k] + beta * (*pk - omega * v[k]);
+        });
         pre_data.apply(matrix, pre, &p, &mut ph, &mut scratch);
         matrix.matvec_into(&ph, &mut v);
         alpha = cdiv(rho, dot_conj(&r_hat, &v));
-        for k in 0..n {
-            s[k] = r[k] - alpha * v[k];
-        }
+        crate::par::for_each_indexed_mut(&mut s, |k, sk| {
+            *sk = r[k] - alpha * v[k];
+        });
         let s_norm = norm2(&s) / b_norm;
         if s_norm < tol && s_norm.is_finite() {
-            for k in 0..n {
-                x[k] += alpha * ph[k];
-            }
+            crate::par::for_each_indexed_mut(&mut x, |k, xk| {
+                *xk += alpha * ph[k];
+            });
             return Ok(done(iter, s_norm, true, x));
         }
         pre_data.apply(matrix, pre, &s, &mut z, &mut scratch);
         matrix.matvec_into(&z, &mut t);
         omega = cdiv(dot_conj(&t, &s), dot_conj(&t, &t));
-        for k in 0..n {
-            x[k] += alpha * ph[k] + omega * z[k];
-            r[k] = s[k] - omega * t[k];
-        }
+        crate::par::for_each_indexed_mut(&mut x, |k, xk| {
+            *xk += alpha * ph[k] + omega * z[k];
+        });
+        crate::par::for_each_indexed_mut(&mut r, |k, rk| {
+            *rk = s[k] - omega * t[k];
+        });
         let r_norm = norm2(&r) / b_norm;
         if r_norm < tol && r_norm.is_finite() {
             return Ok(done(iter, r_norm, true, x));
@@ -277,7 +279,10 @@ mod tests {
             let res = bicgstab(&a, &b, 1e-10, 100, pre, &Budget::none()).unwrap();
             assert!(res.converged, "pre={pre:?}");
             for (got, want) in res.x.iter().zip(x_exact.iter()) {
-                assert!((got - want).norm() < 1e-8, "pre={pre:?} got={got} want={want}");
+                assert!(
+                    (got - want).norm() < 1e-8,
+                    "pre={pre:?} got={got} want={want}"
+                );
             }
             assert!(res.residual_norm < 1e-10);
         }

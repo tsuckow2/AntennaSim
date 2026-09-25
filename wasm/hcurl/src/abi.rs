@@ -228,10 +228,7 @@ fn read_region<T: Copy>(
     let region = bytes.get(offset..offset + byte_len).ok_or_else(|| {
         Error::InvalidRequest(format!("{label}: region extends past buffer bounds"))
     })?;
-    Ok(region
-        .chunks_exact(width)
-        .map(decode)
-        .collect())
+    Ok(region.chunks_exact(width).map(decode).collect())
 }
 
 fn decode_f64x3(s: &[u8]) -> [f64; 3] {
@@ -284,7 +281,9 @@ impl PointRequest {
             )));
         }
         if bytes.len() > MAX_REQUEST_BYTES {
-            return Err(Error::InvalidRequest("request exceeds size limit".to_string()));
+            return Err(Error::InvalidRequest(
+                "request exceeds size limit".to_string(),
+            ));
         }
 
         let abi_version = read_u32(bytes, 0, "abi_version")?;
@@ -400,14 +399,18 @@ impl PointRequest {
         )?;
         let metadata_offset = read_u32(bytes, 80, "metadata_offset")? as usize;
         let metadata_len = read_u32(bytes, 124, "metadata_byte_len")? as usize;
-        let metadata_bytes = bytes.get(metadata_offset..metadata_offset + metadata_len).ok_or_else(|| {
-            Error::InvalidRequest("metadata region extends past buffer bounds".to_string())
-        })?;
+        let metadata_bytes = bytes
+            .get(metadata_offset..metadata_offset + metadata_len)
+            .ok_or_else(|| {
+                Error::InvalidRequest("metadata region extends past buffer bounds".to_string())
+            })?;
         let metadata = RequestMetadata::parse(metadata_bytes)?;
 
         // Cross-field consistency, mirroring the TypeScript packer checks.
         if vertices.len() != vertex_count {
-            return Err(Error::InvalidRequest("vertices length mismatch".to_string()));
+            return Err(Error::InvalidRequest(
+                "vertices length mismatch".to_string(),
+            ));
         }
         if tets.len() != tet_count {
             return Err(Error::InvalidRequest("tets length mismatch".to_string()));
@@ -418,7 +421,9 @@ impl PointRequest {
             ));
         }
         if boundary_facets.len() != boundary_facet_count {
-            return Err(Error::InvalidRequest("boundary_facets length mismatch".to_string()));
+            return Err(Error::InvalidRequest(
+                "boundary_facets length mismatch".to_string(),
+            ));
         }
         if boundary_attr.len() != boundary_facet_count {
             return Err(Error::InvalidRequest(
@@ -426,7 +431,9 @@ impl PointRequest {
             ));
         }
         if port_pos_facets.len() != port_pos_count {
-            return Err(Error::InvalidRequest("port_pos_facets length mismatch".to_string()));
+            return Err(Error::InvalidRequest(
+                "port_pos_facets length mismatch".to_string(),
+            ));
         }
         if port_pos_facets.len() + port_neg_facets.len() != port_facet_count {
             return Err(Error::InvalidRequest(
@@ -456,14 +463,18 @@ impl PointRequest {
         for tet in &tets {
             for &v in tet {
                 if (v as usize) >= vertex_count {
-                    return Err(Error::InvalidRequest("tet vertex index out of bounds".to_string()));
+                    return Err(Error::InvalidRequest(
+                        "tet vertex index out of bounds".to_string(),
+                    ));
                 }
             }
         }
         for facet in &boundary_facets {
             for &v in facet {
                 if (v as usize) >= vertex_count {
-                    return Err(Error::InvalidRequest("facet vertex index out of bounds".to_string()));
+                    return Err(Error::InvalidRequest(
+                        "facet vertex index out of bounds".to_string(),
+                    ));
                 }
             }
         }
@@ -614,7 +625,9 @@ impl FarFieldBlob {
                 })?)
                 .ok_or_else(|| Error::InvalidRequest("far-field blob overruns".to_string()))?;
             if end > bytes.len() {
-                return Err(Error::InvalidRequest("truncated far-field blob".to_string()));
+                return Err(Error::InvalidRequest(
+                    "truncated far-field blob".to_string(),
+                ));
             }
             let vals: Vec<f64> = bytes[off..end]
                 .chunks_exact(8)
@@ -646,7 +659,8 @@ impl FarFieldBlob {
 
 /// A solved frequency point, ready for [`PointResponse::serialize`].
 #[derive(Debug, Clone)]
-pub struct PointResponse {    pub status: u32,
+pub struct PointResponse {
+    pub status: u32,
     pub residual_norm: Option<f64>,
     pub iteration_count: Option<u32>,
     pub zin: Option<Complex64>,
@@ -749,8 +763,8 @@ mod tests {
         blobs.push(mat);
         blobs.push(br#"{"reference_impedance_ohms": 50}"#.to_vec()); // metadata
         blobs.push(0u32.to_le_bytes().to_vec()); // port_neg: facet 0
-        // port_attr is pos-then-neg CONTIGUOUS in the real packer; keep the
-        // two halves adjacent so the single region read sees both.
+                                                 // port_attr is pos-then-neg CONTIGUOUS in the real packer; keep the
+                                                 // two halves adjacent so the single region read sees both.
         blobs.push(30u32.to_le_bytes().to_vec()); // port_attr pos
         blobs.push(31u32.to_le_bytes().to_vec()); // port_attr neg
 
@@ -844,12 +858,8 @@ mod tests {
         };
         let bytes = resp.serialize();
         assert_eq!(bytes.len(), RESPONSE_HEADER_BYTES + 3 + 2);
-        let u32_at = |off: usize| {
-            u32::from_le_bytes(bytes[off..off + 4].try_into().unwrap())
-        };
-        let f64_at = |off: usize| {
-            f64::from_le_bytes(bytes[off..off + 8].try_into().unwrap())
-        };
+        let u32_at = |off: usize| u32::from_le_bytes(bytes[off..off + 4].try_into().unwrap());
+        let f64_at = |off: usize| f64::from_le_bytes(bytes[off..off + 8].try_into().unwrap());
         assert_eq!(u32_at(0), 1);
         assert_eq!(u32_at(4), 0);
         assert_eq!(u32_at(24), 1117);
@@ -859,7 +869,10 @@ mod tests {
         assert_eq!(u32_at(92), 3);
         assert_eq!(u32_at(96), (RESPONSE_HEADER_BYTES + 3) as u32);
         assert_eq!(u32_at(100), 2);
-        assert_eq!(&bytes[RESPONSE_HEADER_BYTES..RESPONSE_HEADER_BYTES + 3], &[9, 9, 9]);
+        assert_eq!(
+            &bytes[RESPONSE_HEADER_BYTES..RESPONSE_HEADER_BYTES + 3],
+            &[9, 9, 9]
+        );
         assert_eq!(&bytes[RESPONSE_HEADER_BYTES + 3..], b"ok");
     }
 

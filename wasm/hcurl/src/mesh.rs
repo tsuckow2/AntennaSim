@@ -27,7 +27,11 @@ impl Material {
     fn sanitize(raw: &abi::Material) -> Self {
         Self {
             attribute: raw.attribute,
-            epsilon_r: if raw.epsilon_r > 0.0 { raw.epsilon_r } else { 1.0 },
+            epsilon_r: if raw.epsilon_r > 0.0 {
+                raw.epsilon_r
+            } else {
+                1.0
+            },
             mu_r: if raw.mu_r > 0.0 { raw.mu_r } else { 1.0 },
             conductivity_s_m: if raw.conductivity_s_m.is_finite() {
                 raw.conductivity_s_m

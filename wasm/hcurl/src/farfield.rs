@@ -14,10 +14,10 @@
 //! components and pointed the gain lobe down through the ground plane. The
 //! cross products live in [`surface_currents`], pinned by unit tests.
 
+use crate::clock::Stopwatch;
 use num_complex::Complex64;
 use std::collections::HashMap;
 use std::f64::consts::PI;
-use crate::clock::Stopwatch;
 
 use crate::abi::ATTR_EXTERIOR_ABSORBING;
 use crate::basis::{edge_length, TET_EDGES};
@@ -225,7 +225,11 @@ pub fn compute_far_field(
             (pu[1] + pv[1] + pw[1]) / 3.0,
             (pu[2] + pv[2] + pw[2]) / 3.0,
         ];
-        let outward = [fc[0] - geom.centroid[0], fc[1] - geom.centroid[1], fc[2] - geom.centroid[2]];
+        let outward = [
+            fc[0] - geom.centroid[0],
+            fc[1] - geom.centroid[1],
+            fc[2] - geom.centroid[2],
+        ];
         if n[0] * outward[0] + n[1] * outward[1] + n[2] * outward[2] < 0.0 {
             n = [-n[0], -n[1], -n[2]];
         }
@@ -246,7 +250,11 @@ pub fn compute_far_field(
             let gb = geom.grad_lambda(b);
             // N_e(centroid) = s·l/4·(∇λb − ∇λa).
             let f = s * len / 4.0;
-            let nv = [f * (gb[0] - ga[0]), f * (gb[1] - ga[1]), f * (gb[2] - ga[2])];
+            let nv = [
+                f * (gb[0] - ga[0]),
+                f * (gb[1] - ga[1]),
+                f * (gb[2] - ga[2]),
+            ];
             // curl N_e = s·2·l·(∇λa × ∇λb).
             let g = s * 2.0 * len;
             let cv = [
@@ -272,15 +280,22 @@ pub fn compute_far_field(
     }
 
     // Radiate the equivalent currents on the θ/φ grid.
-    let theta_deg: Vec<f64> = (0..n_theta).map(|ti| ti as f64 * 180.0 / (n_theta - 1) as f64).collect();
-    let phi_deg: Vec<f64> = (0..n_phi).map(|pj| pj as f64 * 360.0 / n_phi as f64).collect();
+    let theta_deg: Vec<f64> = (0..n_theta)
+        .map(|ti| ti as f64 * 180.0 / (n_theta - 1) as f64)
+        .collect();
+    let phi_deg: Vec<f64> = (0..n_phi)
+        .map(|pj| pj as f64 * 360.0 / n_phi as f64)
+        .collect();
     let k0_over_4pi = k0 / (4.0 * PI);
     let d_theta = PI / (n_theta - 1) as f64;
     let d_phi = 2.0 * PI / n_phi as f64;
     let neg_j = Complex64::new(0.0, -1.0);
 
-    let mut u_grid: Vec<Vec<f64>> = Vec::with_capacity(n_theta);
-    for &theta_d in &theta_deg {
+    // Each theta row is independent (read-only shared sources); the ordered
+    // collect keeps `u_grid` bit-identical to the serial loop. The power
+    // integral and gain/max scan below stay serial: they are cheap, and the
+    // serial max-scan keeps tie-breaking deterministic.
+    let rows: Vec<Result<Vec<f64>>> = crate::par::map_indexed(&theta_deg, |_, &theta_d| {
         budget.check()?;
         let theta = theta_d * PI / 180.0;
         let (st, ct) = theta.sin_cos();
@@ -316,7 +331,12 @@ pub fn compute_far_field(
             let e_ph = neg_j * k0_over_4pi * (ETA0 * n_ph - l_th);
             u_row.push((e_th.norm_sqr() + e_ph.norm_sqr()) / (2.0 * ETA0));
         }
-        u_grid.push(u_row);
+        Ok(u_row)
+    });
+
+    let mut u_grid: Vec<Vec<f64>> = Vec::with_capacity(n_theta);
+    for row in rows {
+        u_grid.push(row?);
     }
 
     let mut radiated_power_w = 0.0;
@@ -346,7 +366,9 @@ pub fn compute_far_field(
             let g = to_dbi(4.0 * PI * u / accepted_power_w);
             let d = to_dbi(4.0 * PI * u / radiated_power_w);
             if !g.is_finite() || !d.is_finite() {
-                return Err(Error::FarField("far-field pattern is non-finite".to_string()));
+                return Err(Error::FarField(
+                    "far-field pattern is non-finite".to_string(),
+                ));
             }
             if g > max_gain_dbi {
                 max_gain_dbi = g;
@@ -467,7 +489,15 @@ mod tests {
         mesh.boundary_attributes = vec![crate::abi::ATTR_CONDUCTOR_PEC];
         let sys = build_edge_system(&mesh).unwrap();
         let x = vec![z(1.0, 0.0); sys.free_dof_count];
-        let err = compute_far_field(&mesh, &sys, &x, 3.0e9, 1.0, &FarFieldOptions::default(), &Budget::none());
+        let err = compute_far_field(
+            &mesh,
+            &sys,
+            &x,
+            3.0e9,
+            1.0,
+            &FarFieldOptions::default(),
+            &Budget::none(),
+        );
         assert!(matches!(err, Err(Error::FarField(_))));
     }
 }

@@ -143,9 +143,15 @@ pub fn solve_point(request: &PointRequest, budget: &Budget) -> Result<PointRespo
                 theta_step_deg: ff_meta.theta_step_deg.unwrap_or(5.0),
                 phi_step_deg: ff_meta.phi_step_deg.unwrap_or(5.0),
             };
-            if let Ok(ff) =
-                compute_far_field(&mesh, &sys, &kry.x, frequency_hz, 0.5 * zin.re, &options, budget)
-            {
+            if let Ok(ff) = compute_far_field(
+                &mesh,
+                &sys,
+                &kry.x,
+                frequency_hz,
+                0.5 * zin.re,
+                &options,
+                budget,
+            ) {
                 field_blob = FarFieldBlob::from_result(&ff).serialize();
             }
         }

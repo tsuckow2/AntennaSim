@@ -51,9 +51,9 @@ impl Error {
     /// Numeric status code written into the packed response header.
     pub fn status_code(&self) -> u32 {
         match self {
-            Error::InvalidRequest(_)
-            | Error::UnsupportedAbi { .. }
-            | Error::EndiannessMismatch => 1,
+            Error::InvalidRequest(_) | Error::UnsupportedAbi { .. } | Error::EndiannessMismatch => {
+                1
+            }
             Error::Mesh(_) => 2,
             Error::Assembly(_) => 3,
             Error::Solver { .. } | Error::FarField(_) | Error::Internal(_) => 6,

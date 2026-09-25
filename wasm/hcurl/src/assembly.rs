@@ -18,8 +18,8 @@ use num_complex::Complex64;
 use std::f64::consts::PI;
 
 use crate::abc::assemble_abc_triplets;
-use crate::budget::Budget;
 use crate::basis::{edge_length, local_matrices};
+use crate::budget::Budget;
 use crate::constants::{C0, EPS0};
 use crate::csr::CsrMatrix;
 use crate::edge::EdgeSystem;
@@ -56,50 +56,61 @@ pub fn assemble_volume_triplets(
 ) -> Result<Vec<(usize, usize, Complex64)>> {
     let omega = 2.0 * PI * frequency_hz;
     let k0 = omega / C0;
-    let mut triplets = Vec::new();
 
-    for (ord, &tet) in sys.active_tets.iter().enumerate() {
-        if ord % 256 == 0 {
-            budget.check()?;
-        }
-        let tet = tet as usize;
-        let material = mesh.material_for_region(mesh.tet_regions[tet]);
-        let geom = tet_geometry(mesh, tet)?;
-
-        let mut lengths = [0.0f64; 6];
-        let mut signs = [0i8; 6];
-        for e in 0..6 {
-            lengths[e] = edge_length(mesh, tet, e);
-            signs[e] = sys.tet_edge_sign[ord * 6 + e];
-        }
-        let (curl, mass) = local_matrices(&geom, &lengths, &signs);
-
-        let eps_re = material.epsilon_r;
-        let eps_im = -material.epsilon_r * material.loss_tangent
-            - material.conductivity_s_m / (omega * EPS0);
-        let mass_re = -k0 * k0 * eps_re;
-        let mass_im = -k0 * k0 * eps_im;
-        let inv_mu = 1.0 / material.mu_r;
-
-        for i in 0..6 {
-            let di = sys.dof_of_edge[sys.tet_edges[ord * 6 + i] as usize];
-            if di < 0 {
-                continue;
+    // Per-tet triplet chunks computed in parallel. `map_indexed` preserves
+    // tet order, so flattening below reproduces the serial triplet sequence
+    // exactly and the CSR build is bit-identical. `Budget` is `Sync`
+    // (atomic flag + `Instant`), so cancellation stays responsive.
+    let chunks: Vec<Result<Vec<(usize, usize, Complex64)>>> =
+        crate::par::map_indexed(&sys.active_tets, |ord, &tet| {
+            if ord % 256 == 0 {
+                budget.check()?;
             }
-            for j in 0..6 {
-                let dj = sys.dof_of_edge[sys.tet_edges[ord * 6 + j] as usize];
-                if dj < 0 {
+            let tet = tet as usize;
+            let material = mesh.material_for_region(mesh.tet_regions[tet]);
+            let geom = tet_geometry(mesh, tet)?;
+
+            let mut lengths = [0.0f64; 6];
+            let mut signs = [0i8; 6];
+            for e in 0..6 {
+                lengths[e] = edge_length(mesh, tet, e);
+                signs[e] = sys.tet_edge_sign[ord * 6 + e];
+            }
+            let (curl, mass) = local_matrices(&geom, &lengths, &signs);
+
+            let eps_re = material.epsilon_r;
+            let eps_im = -material.epsilon_r * material.loss_tangent
+                - material.conductivity_s_m / (omega * EPS0);
+            let mass_re = -k0 * k0 * eps_re;
+            let mass_im = -k0 * k0 * eps_im;
+            let inv_mu = 1.0 / material.mu_r;
+
+            let mut chunk = Vec::with_capacity(36);
+            for i in 0..6 {
+                let di = sys.dof_of_edge[sys.tet_edges[ord * 6 + i] as usize];
+                if di < 0 {
                     continue;
                 }
-                let kval = inv_mu * curl[i * 6 + j];
-                let qval = mass[i * 6 + j];
-                triplets.push((
-                    di as usize,
-                    dj as usize,
-                    Complex64::new(kval + mass_re * qval, mass_im * qval),
-                ));
+                for j in 0..6 {
+                    let dj = sys.dof_of_edge[sys.tet_edges[ord * 6 + j] as usize];
+                    if dj < 0 {
+                        continue;
+                    }
+                    let kval = inv_mu * curl[i * 6 + j];
+                    let qval = mass[i * 6 + j];
+                    chunk.push((
+                        di as usize,
+                        dj as usize,
+                        Complex64::new(kval + mass_re * qval, mass_im * qval),
+                    ));
+                }
             }
-        }
+            Ok(chunk)
+        });
+
+    let mut triplets = Vec::new();
+    for chunk in chunks {
+        triplets.extend(chunk?);
     }
     Ok(triplets)
 }

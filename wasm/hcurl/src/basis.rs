@@ -48,7 +48,11 @@ pub fn edge_length(mesh: &crate::mesh::Mesh, tet: usize, e: usize) -> f64 {
 pub fn curl_vector(geom: &TetGeometry, e: usize, length: f64) -> [f64; 3] {
     let [a, b] = TET_EDGES[e];
     let c = cross(geom.grad_lambda(a), geom.grad_lambda(b));
-    [2.0 * length * c[0], 2.0 * length * c[1], 2.0 * length * c[2]]
+    [
+        2.0 * length * c[0],
+        2.0 * length * c[1],
+        2.0 * length * c[2],
+    ]
 }
 
 /// Local 6×6 element brackets (row-major), orientation signs applied.
@@ -106,12 +110,7 @@ pub fn local_matrices(
 /// Analytic integral `∫_tet N_e dV = s_e·l_e·(V/4)·(∇λb − ∇λa)`.
 ///
 /// Used for the impressed-current RHS and the port-voltage path integral.
-pub fn edge_field_integral(
-    geom: &TetGeometry,
-    e: usize,
-    sign: i8,
-    length: f64,
-) -> [f64; 3] {
+pub fn edge_field_integral(geom: &TetGeometry, e: usize, sign: i8, length: f64) -> [f64; 3] {
     let [a, b] = TET_EDGES[e];
     let ga = geom.grad_lambda(a);
     let gb = geom.grad_lambda(b);
@@ -171,7 +170,11 @@ mod tests {
         let lengths = [1.0, 1.0, 1.0, 2f64.sqrt(), 2f64.sqrt(), 2f64.sqrt()];
         let signs = [1i8; 6];
         let (curl, _) = local_matrices(&geom, &lengths, &signs);
-        assert!((curl[0] - 4.0 / 3.0).abs() < 1e-12, "curl[0][0]={}", curl[0]);
+        assert!(
+            (curl[0] - 4.0 / 3.0).abs() < 1e-12,
+            "curl[0][0]={}",
+            curl[0]
+        );
         // Symmetric.
         for i in 0..6 {
             for j in 0..6 {
@@ -189,7 +192,11 @@ mod tests {
         let lengths = [1.0, 1.0, 1.0, 2f64.sqrt(), 2f64.sqrt(), 2f64.sqrt()];
         let signs = [1i8; 6];
         let (_, mass) = local_matrices(&geom, &lengths, &signs);
-        assert!((mass[0] - 1.0 / 12.0).abs() < 1e-12, "mass[0][0]={}", mass[0]);
+        assert!(
+            (mass[0] - 1.0 / 12.0).abs() < 1e-12,
+            "mass[0][0]={}",
+            mass[0]
+        );
         for i in 0..6 {
             for j in 0..6 {
                 assert!((mass[i * 6 + j] - mass[j * 6 + i]).abs() < 1e-12);
@@ -207,7 +214,11 @@ mod tests {
         let lengths = [1.0; 6];
         let signs = [1i8; 6];
         let (_, mass) = local_matrices(&geom, &lengths, &signs);
-        assert!((mass[1] - 1.0 / 24.0).abs() < 1e-12, "mass[0][1]={}", mass[1]);
+        assert!(
+            (mass[1] - 1.0 / 24.0).abs() < 1e-12,
+            "mass[0][1]={}",
+            mass[1]
+        );
     }
 
     #[test]

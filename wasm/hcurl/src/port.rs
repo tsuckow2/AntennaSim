@@ -170,8 +170,14 @@ pub fn build_port_rhs(
             if d < 0 {
                 continue;
             }
-            let iv = edge_field_integral(&geom, e, sys.tet_edge_sign[ord * 6 + e], edge_length(mesh, tet, e));
-            let proj = feed.direction[0] * iv[0] + feed.direction[1] * iv[1] + feed.direction[2] * iv[2];
+            let iv = edge_field_integral(
+                &geom,
+                e,
+                sys.tet_edge_sign[ord * 6 + e],
+                edge_length(mesh, tet, e),
+            );
+            let proj =
+                feed.direction[0] * iv[0] + feed.direction[1] * iv[1] + feed.direction[2] * iv[2];
             b[d as usize].im += coef * proj;
         }
     }
@@ -234,7 +240,12 @@ pub fn port_voltage(
         let gi = locate(p);
         let (ord, geom) = &shapes[gi];
         let ord = *ord;
-        let lambda = [geom.lambda(0, p), geom.lambda(1, p), geom.lambda(2, p), geom.lambda(3, p)];
+        let lambda = [
+            geom.lambda(0, p),
+            geom.lambda(1, p),
+            geom.lambda(2, p),
+            geom.lambda(3, p),
+        ];
         let tet = sys.active_tets[ord] as usize;
         let mut e_vec = [Complex64::new(0.0, 0.0); 3];
         for edge in 0..6 {
@@ -254,7 +265,9 @@ pub fn port_voltage(
                 e_vec[c] += xd * nvec[c];
             }
         }
-        let proj = e_vec[0] * feed.direction[0] + e_vec[1] * feed.direction[1] + e_vec[2] * feed.direction[2];
+        let proj = e_vec[0] * feed.direction[0]
+            + e_vec[1] * feed.direction[1]
+            + e_vec[2] * feed.direction[2];
         v -= proj * (feed.gap_length / samples as f64);
     }
     Ok(v)

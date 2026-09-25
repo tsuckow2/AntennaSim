@@ -118,6 +118,46 @@ cargo build --release --target wasm32-unknown-unknown
 two deployable artifacts; copy both to `frontend/public/wasm/` (see
 *Browser integration*).
 
+## Parallelism
+
+On native targets the hot loops run on Rayon's thread pool through the
+small `par` module (`src/par.rs`): element assembly (volume + ABC), the
+CSR matvec, the BiCGSTAB vector updates and reductions, and the far-field
+θ grid. The thread count follows Rayon's default (one per logical core);
+override it with `RAYON_NUM_THREADS`.
+
+Two guarantees are load-bearing:
+
+- **Bit-identical kernels.** Assembly, matvec, vector updates, and the
+  far-field grid preserve the serial visit and operation order, so they
+  reproduce the serial results exactly — the dipole parity test pins the
+  assembled-matrix anchors to 1e-8 and still passes.
+- **Pool-ordered reductions.** The `norm2` / `dot_conj` sums reduce in
+  thread-pool order: a few ulps of drift, so native iteration counts can
+  wobble by a handful between runs. The parity tolerances (Zin 2%,
+  S11 0.01 absolute) absorb it comfortably.
+
+The symmetric Gauss–Seidel preconditioner stays serial — triangular sweeps
+are inherently sequential — and it is roughly two-thirds of the
+per-iteration work, which caps solve-phase speedup (Amdahl). Measured on
+the dipole fixture (19,429 free DOFs, release build): 7.36 s pinned to one
+thread vs 6.27 s on 2 cores (**1.17×**), identical Zin to 6 decimals.
+Assembly and the far-field grid scale near-linearly; the solve phase sees
+diminishing returns past a few cores until SGS is replaced or parallelized.
+
+```sh
+cargo run --release --example dipole_bench
+RAYON_NUM_THREADS=1 cargo run --release --example dipole_bench
+```
+
+On `wasm32` the `par` helpers compile to plain sequential iterators — the
+WASM module is built without the atomics/`SharedArrayBuffer` threading
+setup, so the browser module is unchanged and stays single-threaded.
+Enabling true WASM threads later needs no numerical-code changes (the
+kernels already go through `par`): build with
+`-C target-feature=+atomics`, initialize a `wasm-bindgen-rayon` thread
+pool from the JS loader, and serve COOP/COEP headers.
+
 ## API
 
 ### Rust

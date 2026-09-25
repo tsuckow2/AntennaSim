@@ -117,17 +117,20 @@ impl CsrMatrix {
     }
 
     /// `y += A x` accumulation form is not provided; this overwrites `y`.
+    ///
+    /// Rows are independent and each row's inner accumulation keeps its
+    /// serial order, so the parallel run is bit-identical to the serial one.
     pub fn matvec_into(&self, x: &[Complex64], y: &mut [Complex64]) {
         assert_eq!(x.len(), self.ncols, "matvec x dimension mismatch");
         assert_eq!(y.len(), self.nrows, "matvec y dimension mismatch");
-        for i in 0..self.nrows {
+        crate::par::for_each_indexed_mut(y, |i, yi| {
             let (cols, vals) = self.row(i);
             let mut acc = Complex64::new(0.0, 0.0);
             for (&c, &v) in cols.iter().zip(vals.iter()) {
                 acc += v * x[c];
             }
-            y[i] = acc;
-        }
+            *yi = acc;
+        });
     }
 
     /// Diagonal entries (zero where structurally absent).
@@ -163,7 +166,11 @@ mod tests {
         let a = CsrMatrix::from_triplets(
             2,
             2,
-            vec![(0, 0, c(2.0, 1.0)), (0, 1, c(3.0, 0.0)), (1, 1, c(1.0, -1.0))],
+            vec![
+                (0, 0, c(2.0, 1.0)),
+                (0, 1, c(3.0, 0.0)),
+                (1, 1, c(1.0, -1.0)),
+            ],
         );
         let x = vec![c(1.0, 0.0), c(0.0, 1.0)];
         let y = a.matvec(&x);
@@ -194,7 +201,11 @@ mod tests {
         let a = CsrMatrix::from_triplets(
             3,
             3,
-            vec![(0, 0, c(5.0, 0.0)), (2, 2, c(-2.0, 1.0)), (0, 2, c(1.0, 1.0))],
+            vec![
+                (0, 0, c(5.0, 0.0)),
+                (2, 2, c(-2.0, 1.0)),
+                (0, 2, c(1.0, 1.0)),
+            ],
         );
         assert_eq!(a.diagonal(), vec![c(5.0, 0.0), c(0.0, 0.0), c(-2.0, 1.0)]);
     }

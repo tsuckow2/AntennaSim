@@ -34,6 +34,7 @@
 //! - [`krylov`] — complex BiCGSTAB + symmetric Gauss–Seidel
 //! - [`port`] — gap source, V/I extraction, S11
 //! - [`farfield`] — Stratton–Chu near-to-far-field transform
+//! - [`par`] — data-parallel loops (Rayon natively, sequential on wasm32)
 //! - [`solve`] — end-to-end single-point orchestration
 //! - [`csr`] — complex compressed-sparse-row matrix
 //! - [`abi`] — packed binary request/response wire format (v1)
@@ -71,6 +72,7 @@ pub mod ffi;
 pub mod geometry;
 pub mod krylov;
 pub mod mesh;
+pub mod par;
 pub mod port;
 pub mod solve;
 

@@ -77,3 +77,41 @@ test solver::tests::free_propagation_stable ... ok
 
 test result: ok. 4 passed; 0 failed
 ```
+
+## Current Sign Fix (2026-09-26)
+
+The Ampère loop in `Feed::measure_i` measures the downward (-z) gap current due to loop orientation. The antenna feed current (into the probe) is upward (+z). The example now negates the measured current:
+
+```rust
+// The Ampère loop measures downward (-z) gap current; the antenna
+// feed current (into the probe) is upward (+z), so negate.
+probe.push(vs, -i_avg);
+```
+
+**Validation (5ns Snyder run):**
+- Before: Zin = -32.6 + j1387 Ω (negative R, nonphysical)
+- After: Zin = +41.6 - j1391 Ω (positive R, capacitive X as expected below resonance)
+
+## Feed Magnitude Issue (2026-09-26, OPEN)
+
+The impedance magnitude is ~20x too large (|Z| ~1400Ω vs expected ~50Ω).
+
+**Root cause:** The probe via (3×3 cells, Ez PEC at k=33-34, z=0.79-1.31mm) does not electrically connect to the patch (Ex/Ey PEC at k=34, z=1.575mm) due to Yee grid staggering. The half-cell gap (0.26mm) creates a capacitive disconnect, resulting in huge capacitive reactance (-j1000).
+
+**Evidence:**
+- Dipole calibration (no substrate, thin wire): ~100Ω magnitude (correct scale)
+- Snyder with via: ~1400Ω (20x too big)
+- Snyder without via: ~3200Ω (worse — via helps but doesn't fully connect)
+- Raw current at step 100: 1.47µA for 0.6mV source (8x smaller than expected for 50Ω)
+
+**Attempted fixes:**
+- Extending via to k=35: crashed (out-of-bounds or instability)
+- Removing via: worse (doubled reactance)
+
+**Required:** Proper FDTD probe feed model that handles Yee stagger. Options:
+1. Overlap via and patch by one cell with careful boundary handling
+2. Use soft current source instead of hard voltage source
+3. Model probe as thin wire with corrected radius
+4. Use delta-gap feed directly on patch (no via)
+
+This is a fundamental FDTD feed modeling issue, not a Yee stencil bug.

@@ -115,7 +115,9 @@ fn main() {
         let vs = source.value(t);
         let si = grid.ez_idx(feed.src_i, feed.src_j, feed.src_k);
         grid.ez[si] = -vs / grid.dz;
-        probe.push(vs, i_avg);
+        // The Ampère loop measures downward (-z) gap current; the antenna
+        // feed current (into the probe) is upward (+z), so negate.
+        probe.push(vs, -i_avg);
         
         if step % 2000 == 0 {
             let max_e = grid.ez.iter().map(|x| x.abs()).fold(0.0f32, f32::max);

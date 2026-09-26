@@ -115,3 +115,17 @@ The impedance magnitude is ~20x too large (|Z| ~1400Ω vs expected ~50Ω).
 4. Use delta-gap feed directly on patch (no via)
 
 This is a fundamental FDTD feed modeling issue, not a Yee stencil bug.
+
+## Soft Source Fix (2026-09-26)
+
+**Problem:** Hard source (`grid.ez[si] = -vs/dz`) clamps the E-field, preventing the patch from resonating. Results in huge capacitive reactance (-j1100).
+
+**Solution:** Soft source (`grid.ez[si] += -vs/dz`) adds to the field without enforcing it, allowing the antenna to radiate.
+
+**Validation (2ns test):**
+- Hard source: Zin = 31 - j1132 Ω at 2.4 GHz
+- Soft source: Zin = 411 + j4 Ω at 2.4 GHz (X≈0, resonance!)
+
+The reactance is now near zero, indicating the patch is resonating. Resistance ~400Ω (8x higher than expected 50Ω) — feed position or scaling may need tuning, but the fundamental resonance is captured.
+
+**Via extension:** k_probe_hi extended from 34 to 35 (z=1.84mm, above patch at 1.575mm) to ensure the via penetrates the patch plane through Yee staggering. Increased peak current 460x (1.47µA → 0.68mA).

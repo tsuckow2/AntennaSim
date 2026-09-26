@@ -114,7 +114,10 @@ fn main() {
         t += dt;
         let vs = source.value(t);
         let si = grid.ez_idx(feed.src_i, feed.src_j, feed.src_k);
-        grid.ez[si] = -vs / grid.dz;
+        // Soft source: add to E (don't enforce). The hard source (=) clamps
+        // the field and prevents the patch from resonating, giving huge
+        // capacitive reactance. Soft source (+) lets the antenna radiate.
+        grid.ez[si] += -vs / grid.dz;
         // The Ampère loop measures downward (-z) gap current; the antenna
         // feed current (into the probe) is upward (+z), so negate.
         probe.push(vs, -i_avg);

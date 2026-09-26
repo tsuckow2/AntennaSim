@@ -39,6 +39,7 @@
 //! - [`solve`] — end-to-end single-point orchestration
 //! - [`csr`] — complex compressed-sparse-row matrix
 //! - [`abi`] — packed binary request/response wire format (v1)
+//! - [`ams`] — auxiliary-space Maxwell preconditioner data
 //! - [`ffi`] — `extern "C"` exports for the WASM module
 //! - `wasm_api` — `#[wasm_bindgen]` exports for the threaded browser build
 //!   (`wasm-threads` feature)
@@ -62,6 +63,7 @@
 
 pub mod abc;
 pub mod abi;
+pub mod ams;
 pub mod assembly;
 pub mod basis;
 pub mod budget;

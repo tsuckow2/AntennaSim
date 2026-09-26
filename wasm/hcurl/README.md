@@ -407,6 +407,51 @@ The dipole's broadside maxima are symmetric: TypeScript reports θ=135°/φ=90°
 Rust reports the equivalent opposite lobe θ=45°/φ=270°; the parity test
 accepts both. Native and WASM FFI runs are bit-identical.
 
+## AMS preconditioner
+
+`src/ams.rs` implements a Hiptmair-style auxiliary-space preconditioner for
+the H(curl) system, exposed as `Preconditioner::Ams` in `src/krylov.rs`.
+It targets the gradient-dominated near-nullspace that makes plain
+pointwise smoothers stall on production meshes.
+
+**Construction** (`AmsPreconditioner::build`):
+
+1. Discrete gradient `G` (free edges × nodal DOFs). The Nédélec basis is
+   length-scaled (`N_e = s_e·l_e·(λa∇λb − λb∇λa)`), so the edge DOF is the
+   length-normalized line integral and `G[e,u] = −1/l_e`, `G[e,v] = +1/l_e`
+   on the edge's endpoint nodes. Verified: `K·Gφ ≈ 0` (discrete de Rham)
+   and exact `±1/l_e` row structure.
+2. Nodal Galerkin matrix `Aₙ = GᵀAG` via sparse triple product. The full
+   active H¹ nodal space is used (including PEC-boundary nodes), since
+   pinning PEC nodes would remove differential modes between separate PEC
+   components (e.g. the two dipole arms).
+3. SGS diagonal data for `Aₙ`, precomputed once.
+
+**Application** (additive): one edge SGS sweep plus the coarse correction
+`G·Aₙ⁻¹·Gᵀr`. The inner nodal approximation is a fixed 3 SGS sweeps
+(`inner_sweeps`; set to 0 for inner BiCGSTAB+SGS diagnostics) — cheap and a
+*fixed* linear operator, which plain BiCGSTAB prefers over a
+tolerance-stopped inner Krylov solve.
+
+**Validation** (2026-09-26):
+
+| Case | SGS iters | AMS iters | SGS wall | AMS wall | ΔZin |
+|---|---|---|---|---|---|
+| Dipole 3 GHz (19k DOFs) | 1,063 | 77 | — | — | 0 |
+| Snyder patch 2.5 GHz (125k DOFs) | 7,166 | 320 | 182.8 s | 13.2 s | 4e-8 Ω |
+
+22× fewer iterations and ~14× wall-time speedup on the production mesh,
+with impedance identical to 7 decimals. AMS build cost is ~1 s
+(19k nodal DOFs, 272k nnz). Run the head-to-head yourself:
+
+```sh
+cargo run --release --example ams_bench -- <request.req>
+cargo run --release --example ams_diag   # de Rham + inner/outer diagnostics
+```
+
+`Preconditioner::Ams` is opt-in; the production `solve_point` path still
+uses SGS until AMS is validated across more geometries.
+
 ## Current limitations
 
 - First-order Nédélec elements and a first-order Silver–Müller ABC: accuracy

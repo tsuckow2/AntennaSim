@@ -1,4 +1,5 @@
-//! Complex BiCGSTAB with Jacobi / symmetric Gauss–Seidel preconditioning.
+//! Complex BiCGSTAB with Jacobi / symmetric Gauss–Seidel / auxiliary-space
+//! Maxwell preconditioning.
 //!
 //! Solves the general complex (non-Hermitian, complex-symmetric) system
 //! `A·x = b` using the Hermitian inner product `⟨x,y⟩ = Σ conj(xₖ)·yₖ`.
@@ -10,6 +11,7 @@
 
 use num_complex::Complex64;
 
+use crate::ams::AmsPreconditioner;
 use crate::budget::Budget;
 use crate::csr::CsrMatrix;
 use crate::error::Result;
@@ -22,12 +24,16 @@ pub const DEFAULT_MAX_ITER: u32 = 12000;
 const TINY: f64 = 1e-300;
 
 /// Available left preconditioners.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub enum Preconditioner {
     /// Pointwise `x·conj(D)/|D|²` (kept for testing; pass-through on tiny diagonal).
     Jacobi,
     /// One symmetric sweep `M = (D+L)·D⁻¹·(D+U)` with the complex diagonal.
     Sgs,
+    /// Auxiliary-space Maxwell (Hiptmair–Xu): SGS smoother plus a coarse
+    /// correction on the discrete-gradient (nodal) auxiliary space. Carries
+    /// precomputed operator data; see [`crate::ams`].
+    Ams(AmsPreconditioner),
 }
 
 /// Outcome of a BiCGSTAB run.
@@ -74,13 +80,18 @@ fn dot_conj(a: &[Complex64], b: &[Complex64]) -> Complex64 {
     })
 }
 
-struct PreconditionerData {
+/// Diagonal data for the pointwise smoothers (Jacobi / SGS).
+///
+/// `pub(crate)` so the AMS module can precompute it once for the nodal
+/// auxiliary matrix instead of rebuilding it per outer iteration.
+#[derive(Debug, Clone)]
+pub(crate) struct PreconditionerData {
     diag: Vec<Complex64>,
     inv_diag: Vec<Complex64>, // conj(D)/|D|², or 1 on tiny diagonal
 }
 
 impl PreconditionerData {
-    fn new(matrix: &CsrMatrix) -> Self {
+    pub(crate) fn new(matrix: &CsrMatrix) -> Self {
         let n = matrix.nrows();
         let mut diag = vec![Complex64::new(0.0, 0.0); n];
         let mut inv_diag = vec![Complex64::new(1.0, 0.0); n];
@@ -102,52 +113,72 @@ impl PreconditionerData {
     fn apply(
         &self,
         matrix: &CsrMatrix,
-        pre: Preconditioner,
+        pre: &Preconditioner,
         x: &[Complex64],
         out: &mut [Complex64],
         scratch: &mut [Complex64],
-    ) {
-        let n = matrix.nrows();
+        budget: &Budget,
+    ) -> Result<()> {
         match pre {
             Preconditioner::Jacobi => {
+                let n = matrix.nrows();
                 for k in 0..n {
                     out[k] = x[k] * self.inv_diag[k];
                 }
             }
             Preconditioner::Sgs => {
-                // Forward: (D + L)·y = x.
-                for i in 0..n {
-                    let mut s = x[i];
-                    let (cols, vals) = matrix.row(i);
-                    for (&j, &a) in cols.iter().zip(vals.iter()) {
-                        if j < i {
-                            s -= a * scratch[j];
-                        }
-                    }
-                    let d = self.diag[i];
-                    scratch[i] = if d.norm_sqr() < TINY {
-                        s // pass through undivided
-                    } else {
-                        cdiv(s, d)
-                    };
-                }
-                // Backward: (D + U)·z = D·y.
-                for i in (0..n).rev() {
-                    let d = self.diag[i];
-                    let mut s = d * scratch[i];
-                    let (cols, vals) = matrix.row(i);
-                    for (&j, &a) in cols.iter().zip(vals.iter()) {
-                        if j > i {
-                            s -= a * out[j];
-                        }
-                    }
-                    out[i] = if d.norm_sqr() < TINY {
-                        s // pass through undivided
-                    } else {
-                        cdiv(s, d)
-                    };
+                self.sgs_apply(matrix, x, out, scratch);
+            }
+            Preconditioner::Ams(ams) => {
+                // Additive AMS: pointwise smoother plus the coarse
+                // discrete-gradient correction.
+                self.sgs_apply(matrix, x, out, scratch);
+                ams.apply_correction(x, out, budget)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// One symmetric Gauss–Seidel sweep `M = (D+L)·D⁻¹·(D+U)`.
+    pub(crate) fn sgs_apply(
+        &self,
+        matrix: &CsrMatrix,
+        x: &[Complex64],
+        out: &mut [Complex64],
+        scratch: &mut [Complex64],
+    ) {
+        let n = matrix.nrows();
+        // Forward: (D + L)·y = x.
+        for i in 0..n {
+            let mut s = x[i];
+            let (cols, vals) = matrix.row(i);
+            for (&j, &a) in cols.iter().zip(vals.iter()) {
+                if j < i {
+                    s -= a * scratch[j];
                 }
             }
+            let d = self.diag[i];
+            scratch[i] = if d.norm_sqr() < TINY {
+                s // pass through undivided
+            } else {
+                cdiv(s, d)
+            };
+        }
+        // Backward: (D + U)·z = D·y.
+        for i in (0..n).rev() {
+            let d = self.diag[i];
+            let mut s = d * scratch[i];
+            let (cols, vals) = matrix.row(i);
+            for (&j, &a) in cols.iter().zip(vals.iter()) {
+                if j > i {
+                    s -= a * out[j];
+                }
+            }
+            out[i] = if d.norm_sqr() < TINY {
+                s // pass through undivided
+            } else {
+                cdiv(s, d)
+            };
         }
     }
 }
@@ -211,7 +242,7 @@ pub fn bicgstab(
         crate::par::for_each_indexed_mut(&mut p, |k, pk| {
             *pk = r[k] + beta * (*pk - omega * v[k]);
         });
-        pre_data.apply(matrix, pre, &p, &mut ph, &mut scratch);
+        pre_data.apply(matrix, &pre, &p, &mut ph, &mut scratch, budget)?;
         matrix.matvec_into(&ph, &mut v);
         alpha = cdiv(rho, dot_conj(&r_hat, &v));
         crate::par::for_each_indexed_mut(&mut s, |k, sk| {
@@ -224,7 +255,7 @@ pub fn bicgstab(
             });
             return Ok(done(iter, s_norm, true, x));
         }
-        pre_data.apply(matrix, pre, &s, &mut z, &mut scratch);
+        pre_data.apply(matrix, &pre, &s, &mut z, &mut scratch, budget)?;
         matrix.matvec_into(&z, &mut t);
         omega = cdiv(dot_conj(&t, &s), dot_conj(&t, &t));
         crate::par::for_each_indexed_mut(&mut x, |k, xk| {
@@ -276,7 +307,7 @@ mod tests {
     fn converges_to_known_solution() {
         let (a, b, x_exact) = small_system();
         for pre in [Preconditioner::Jacobi, Preconditioner::Sgs] {
-            let res = bicgstab(&a, &b, 1e-10, 100, pre, &Budget::none()).unwrap();
+            let res = bicgstab(&a, &b, 1e-10, 100, pre.clone(), &Budget::none()).unwrap();
             assert!(res.converged, "pre={pre:?}");
             for (got, want) in res.x.iter().zip(x_exact.iter()) {
                 assert!(
@@ -325,7 +356,15 @@ mod tests {
         let x = vec![c(3.0, 0.0), c(3.0, 0.0)];
         let mut out = vec![c(0.0, 0.0); 2];
         let mut scratch = vec![c(0.0, 0.0); 2];
-        pre.apply(&a, Preconditioner::Sgs, &x, &mut out, &mut scratch);
+        pre.apply(
+            &a,
+            &Preconditioner::Sgs,
+            &x,
+            &mut out,
+            &mut scratch,
+            &Budget::none(),
+        )
+        .unwrap();
         assert!((out[0].re - 0.6375).abs() < 1e-12, "z0={}", out[0]);
         assert!((out[1].re - 0.45).abs() < 1e-12, "z1={}", out[1]);
     }

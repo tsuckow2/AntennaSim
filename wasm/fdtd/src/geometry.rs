@@ -58,10 +58,11 @@ pub fn build_snyder(g: &YeeGrid, mat: &mut Materials, dt: f32) -> Feed {
     let k_ground = 31; // z = 0
     let k_patch = 34; // z = 1.575 mm
     // Probe z-range in Ez indices: z ∈ [0.525, 1.575] mm → k = 33, 34.
-    // Extended to k=35 (z=1.84mm, above patch at 1.575mm) to ensure the
-    // via penetrates the patch plane through Yee staggering.
+    // NOTE: Extending to k=35 (above patch) creates a monopole stub that
+    // radiates into free space (~410Ω) instead of feeding the patch.
+    // Keep via at k=34 and rely on Yee coupling to the patch plane.
     let k_probe_lo = 33;
-    let k_probe_hi = 35;
+    let k_probe_hi = 34;
     // Gap/source cell: Ez k=32 (z ∈ [0, 0.525] mm).
     let k_src = 32;
 

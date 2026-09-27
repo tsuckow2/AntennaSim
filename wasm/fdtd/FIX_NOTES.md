@@ -129,3 +129,24 @@ This is a fundamental FDTD feed modeling issue, not a Yee stencil bug.
 The reactance is now near zero, indicating the patch is resonating. Resistance ~400Ω (8x higher than expected 50Ω) — feed position or scaling may need tuning, but the fundamental resonance is captured.
 
 **Via extension:** k_probe_hi extended from 34 to 35 (z=1.84mm, above patch at 1.575mm) to ensure the via penetrates the patch plane through Yee staggering. Increased peak current 460x (1.47µA → 0.68mA).
+
+## Feed Impedance Status (2026-09-26, continued debugging)
+
+**What works:**
+- Yee stencil correct, stable (47ms/step serial)
+- Current sign validated (R positive)
+- Soft source (`+=`) achieves X≈0 (patch resonance!) vs hard source -j1100
+- 17ns run: Zin ~410 + j3 Ω, S11 ~-2.1 dB across 2-3 GHz
+
+**Open issue: Resistance 8x high (410Ω vs ~50Ω expected)**
+- Free-space source alone gives ~750Ω (source self-impedance)
+- Via geometry changes (k=34 vs 35) have zero effect → via not participating as expected
+- Resistive Thevenin source (50Ω series) attempted but hard/soft source models
+  bypass or overwhelm the conductivity
+- Root cause: lumped source needs proper current-source formulation with
+  correct dt scaling, not voltage addition. The `Ez += -vs/dz` is unphysical.
+
+**For FEM frequency cross-check:**
+The X≈0 indicates the patch resonates in FDTD. The absolute R value requires
+proper port calibration (de-embedding source self-impedance). The resonance
+frequency (where X crosses zero) is the key cross-check metric, not absolute R.

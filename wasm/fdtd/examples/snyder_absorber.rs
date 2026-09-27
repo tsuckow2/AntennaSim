@@ -120,7 +120,10 @@ fn main() {
         grid.ez[si] += -vs / grid.dz;
         // The Ampère loop measures downward (-z) gap current; the antenna
         // feed current (into the probe) is upward (+z), so negate.
-        probe.push(vs, -i_avg);
+        // Measure ACTUAL cell voltage (not intended vs): V = -Ez*dz.
+        // With soft source, the enforced vs differs from the actual field.
+        let v_actual = -grid.ez[si] * grid.dz;
+        probe.push(v_actual, -i_avg);
         
         if step % 2000 == 0 {
             let max_e = grid.ez.iter().map(|x| x.abs()).fold(0.0f32, f32::max);

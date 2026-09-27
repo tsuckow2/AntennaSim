@@ -150,3 +150,77 @@ The reactance is now near zero, indicating the patch is resonating. Resistance ~
 The X≈0 indicates the patch resonates in FDTD. The absolute R value requires
 proper port calibration (de-embedding source self-impedance). The resonance
 frequency (where X crosses zero) is the key cross-check metric, not absolute R.
+
+---
+
+## Research-Corrected Feed Model (2026-09-27)
+
+**Supersedes:** The "Soft Source Fix" and "Feed Impedance Status" sections above.
+The 410+j3 Ω "resonance" was INVALID — it DFT'd the *intended* source waveform
+(V_s) instead of the *actual* gap voltage. With correct V/I extraction, the soft
+source gives the same highly capacitive impedance as the hard source. The
+free-space ~750 Ω is grid self-impedance, not to be subtracted.
+
+**Published feed model implemented (Luebbers & Langdon 1996):**
+- **Resistive (Thevenin) source:** 50 Ω series resistor at the gap cell absorbs
+  reflected waves (~32× faster convergence than hard source). Update replaces
+  the E-update at the source cell: `E_z = −V_s/dz + I_s·Rs/dz`.
+- **Tight 1-cell Ampère loop:** Four H-samples immediately adjacent to the source
+  cell (CCW from +z, +I upward). The old wide loop picked up return currents.
+- **Actual V, not V_s:** Record `V = −E_z·dz` (the gap voltage after the source
+  update), never the prescribed waveform.
+- **Via–patch overlap:** Via extends to k=35 (z=1.84mm), half a cell above the
+  patch plane (z=1.575mm). This is the published Yee wire-end fix (Boonzaaier &
+  Pistorius 1992); without it the via is only capacitively coupled.
+
+**Code changes:**
+- `src/source.rs`: Added `Feed::measure_i_tight()`, `ResistiveSource` struct with
+  `apply()` method, unit tests for loop orientation and Thevenin equation.
+- `src/solver.rs`: `Fdtd::step` now uses the Luebbers source (tight loop I at
+  H-step, resistive update after E/PEC, records actual V/I).
+- `src/geometry.rs`: `k_probe_hi = 35` (via overlaps patch plane).
+- `examples/feed_test.rs`, `snyder_absorber.rs`, `snyder_fdtd.rs`: Updated to
+  resistive source with correct V/I.
+
+**Validation (2ns, Rs=50, 3x3 via):**
+- Re(Zin) POSITIVE (42–67 Ω) — loop sign correct, no negation needed.
+- X still highly capacitive (−j2932 at 2.4 GHz, −j2813 at 2.5 GHz) —
+  via-patch connection incomplete.
+- Via DOES affect Zin (no via: −j3490 at 2.5 GHz; 1x1 via: −j2380;
+  3x3 via: −j2813), but does not create resonance. The patch is weakly
+  excited (fields above patch nonzero but Hy currents tiny).
+- Rs=0 gives identical results — the source is not the problem.
+
+**Open:** The via-patch junction needs better conduction. The k=35 half-cell
+extension (published fix) is insufficient in this geometry. Options: wider via
+at junction, explicit 3D PEC connection, or thin-wire subcell model.
+
+---
+
+## Via Conduction Blocker (2026-09-27)
+
+**Status:** The probe via does NOT conduct as a wire. Extending the via from
+k=35 to k=45 (adding 5.25mm of PEC wire) has ZERO effect on Zin. The via acts
+only as a near-field capacitive load (reducing X from −j3490 to −j2800), not
+as a wire guiding current to the patch.
+
+**Evidence:**
+- Via to k=35: Zin = 52.0 − j2813 at 2.5 GHz
+- Via to k=45: Zin = 52.0 − j2813 at 2.5 GHz (identical)
+- No via: Zin = 29.1 − j3490 at 2.5 GHz (via provides capacitive loading)
+- 1x1 via: Zin = 23.7 − j2380 (slightly better, still capacitive)
+- 17ns run: No resonance, S11 ≈ 0 dB across 2–3 GHz
+
+**Root cause:** Simple PEC-cell (E=0) vias do not model thin wires correctly
+in FDTD. The literature uses subcell thin-wire models (Taflove) that modify
+the H-field update around the wire to account for the wire radius and ensure
+proper current conduction. Without this, the wire is "invisible" to propagating
+fields.
+
+**Impact:** FDTD cannot validate the Snyder patch resonance frequency until
+a thin-wire model is implemented. The resistive source, tight loop, and V/I
+extraction are correct and validated (Re(Z)>0, unit tests pass), but the feed
+cannot deliver current to the patch.
+
+**Next:** Implement Taflove thin-wire subcell model for the probe via, OR use
+an alternative feed (e.g., aperture coupling) that doesn't require a wire.

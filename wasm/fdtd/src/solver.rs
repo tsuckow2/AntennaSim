@@ -1,4 +1,4 @@
-//! Time-stepping: Yee E/H updates, CPML, PEC, hard source, V/I sampling.
+//! Time-stepping: Yee E/H updates, CPML, PEC, resistive source, V/I sampling.
 //!
 //! The H and E updates are each fused into a single z-slab-parallel pass
 //! (Hx/Hy/Hz together; Ex/Ey/Ez together) to stream the field arrays once.
@@ -8,7 +8,7 @@ use rayon::prelude::*;
 use crate::cpml::Cpml;
 use crate::grid::YeeGrid;
 use crate::material::Materials;
-use crate::source::{DftProbe, Feed, GaussianSource};
+use crate::source::{DftProbe, Feed, GaussianSource, ResistiveSource};
 
 pub struct Fdtd {
     pub grid: YeeGrid,
@@ -17,10 +17,10 @@ pub struct Fdtd {
     pub dt: f32,
     pub feed: Feed,
     pub source: GaussianSource,
+    pub rsource: ResistiveSource,
     pub probe: DftProbe,
     t: f32,
     step: usize,
-    i_prev: f32,
 }
 
 impl Fdtd {
@@ -31,6 +31,7 @@ impl Fdtd {
         dt: f32,
         feed: Feed,
         source: GaussianSource,
+        rsource: ResistiveSource,
         probe: DftProbe,
     ) -> Self {
         Self {
@@ -40,37 +41,37 @@ impl Fdtd {
             dt,
             feed,
             source,
+            rsource,
             probe,
             t: 0.0,
             step: 0,
-            i_prev: 0.0,
         }
     }
 
-    /// One full step: H^{n+½}, then E^{n+1}, then source/PEC/DFT.
+    /// One full step: H^{n+½}, then E^{n+1}, then resistive source + DFT.
+    ///
+    /// Luebbers source sequencing: measure the tight-loop current I_s at
+    /// the H-step, run the ordinary E update, enforce PEC, then overwrite
+    /// the source cell with E_z = −V_s/dz + I_s·Rs/dz. Record the ACTUAL
+    /// gap voltage V = −E_z·dz (never the prescribed V_s) with I_s.
     pub fn step(&mut self) {
         let dt = self.dt;
         update_h(&mut self.grid, dt);
         self.cpml.correct_h(&mut self.grid, dt);
 
-        // I at the H-step; average adjacent H-steps to collocate with E-step V.
-        let i_now = self.feed.measure_i(&self.grid);
-        let i_avg = 0.5 * (self.i_prev + i_now);
-        self.i_prev = i_now;
+        // Terminal current at the H-step (tight 1-cell loop, +z upward).
+        let i_up = self.feed.measure_i_tight(&self.grid);
 
         update_e(&mut self.grid, &self.mat);
         self.cpml
             .correct_e(&mut self.grid, &self.mat.cb_x, &self.mat.cb_y, &self.mat.cb_z);
         apply_pec(&mut self.grid, &self.mat);
 
-        // Hard voltage source at the gap cell (E-step time).
+        // Resistive source at the gap cell (E-step time).
         self.t += dt;
         let vs = self.source.value(self.t);
-        let si = self
-            .grid
-            .ez_idx(self.feed.src_i, self.feed.src_j, self.feed.src_k);
-        self.grid.ez[si] = -vs / self.grid.dz;
-        self.probe.push(vs, i_avg);
+        let (v_term, i_term) = self.rsource.apply(&mut self.grid, &self.feed, vs, i_up);
+        self.probe.push(v_term, i_term);
 
         self.step += 1;
     }

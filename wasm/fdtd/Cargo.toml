@@ -1,0 +1,20 @@
+[package]
+name = "fdtd"
+version = "0.1.0"
+edition = "2021"
+description = "Yee-grid Finite-Difference Time-Domain solver for antenna S-parameters, built to cross-check the H(curl) FEM solver"
+license = "GPL-3.0-or-later"
+
+[lib]
+name = "fdtd"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+rayon = "1.10"
+
+[dev-dependencies]
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 16

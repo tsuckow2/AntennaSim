@@ -5,7 +5,7 @@ use fdtd::geometry::build_snyder;
 use fdtd::grid::YeeGrid;
 use fdtd::material::Materials;
 use fdtd::solver::{update_e, update_h, apply_pec};
-use fdtd::source::{DftProbe, GaussianSource};
+use fdtd::source::{cdiv, DftProbe, GaussianSource, ResistiveSource};
 use std::time::Instant;
 
 fn add_absorber(mat: &mut Materials, grid: &YeeGrid, dt: f32, nabs: usize, sigma_max: f32) {
@@ -87,6 +87,7 @@ fn main() {
     println!("Conductive absorber added (8 cells, sigma_max=15 S/m)");
     
     let source = GaussianSource::new(2.5e9, 1.0);
+    let rsource = ResistiveSource { rs: 50.0 };
     let freqs: Vec<f64> = (0..101).map(|i| 2.0e9 + i as f64 * 10e6).collect();
     let mut probe = DftProbe::new(freqs.clone(), dt);
     
@@ -94,36 +95,25 @@ fn main() {
     let t_max = 17e-9; // 17 ns full run
     let n_steps = (t_max / dt) as usize;
     println!("Running {} steps ({:.1} ns)...", n_steps, t_max*1e9);
+    println!("Luebbers resistive source Rs=50, tight 1-cell loop, actual V");
     
     let start = Instant::now();
     let mut t = 0.0f32;
-    let mut i_prev = 0.0f32;
     
     for step in 0..n_steps {
         update_h(&mut grid, dt);
         
-        // Measure current at H-step
-        let i_now = feed.measure_i(&grid);
-        let i_avg = 0.5 * (i_prev + i_now);
-        i_prev = i_now;
+        // Terminal current at H-step: tight 1-cell loop (+z upward).
+        let i_up = feed.measure_i_tight(&grid);
         
         update_e(&mut grid, &mat);
         apply_pec(&mut grid, &mat);
         
-        // Hard source
+        // Luebbers resistive source at the gap cell.
         t += dt;
         let vs = source.value(t);
-        let si = grid.ez_idx(feed.src_i, feed.src_j, feed.src_k);
-        // Soft source: add to E (don't enforce). The hard source (=) clamps
-        // the field and prevents the patch from resonating, giving huge
-        // capacitive reactance. Soft source (+) lets the antenna radiate.
-        grid.ez[si] += -vs / grid.dz;
-        // The Ampère loop measures downward (-z) gap current; the antenna
-        // feed current (into the probe) is upward (+z), so negate.
-        // Measure ACTUAL cell voltage (not intended vs): V = -Ez*dz.
-        // With soft source, the enforced vs differs from the actual field.
-        let v_actual = -grid.ez[si] * grid.dz;
-        probe.push(v_actual, -i_avg);
+        let (v_term, i_term) = rsource.apply(&mut grid, &feed, vs, i_up);
+        probe.push(v_term, i_term);
         
         if step % 2000 == 0 {
             let max_e = grid.ez.iter().map(|x| x.abs()).fold(0.0f32, f32::max);
@@ -147,19 +137,11 @@ fn main() {
     for (idx, f) in freqs.iter().enumerate().step_by(10) {
         let (v_re, v_im) = vf[idx];
         let (i_re, i_im) = cf[idx];
-        let denom = i_re*i_re + i_im*i_im;
-        if denom > 1e-30 {
-            let z_re = (v_re*i_re + v_im*i_im) / denom;
-            let z_im = (v_im*i_re - v_re*i_im) / denom;
-            // S11 vs 50 ohm
-            let z0 = 50.0;
-            let gamma_re = ((z_re - z0)*(z_re + z0) + z_im*z_im) / ((z_re + z0)*(z_re + z0) + z_im*z_im);
-            let gamma_im = (2.0*z_im*z0) / ((z_re + z0)*(z_re + z0) + z_im*z_im);
-            let s11_db = 10.0 * (gamma_re*gamma_re + gamma_im*gamma_im).log10();
-            println!("{:14.2} | {:5.1} {:+5.1}j | {:6.2}", 
-                     f/1e9, z_re, z_im, s11_db);
-        } else {
-            println!("{:14.2} | (no signal)", f/1e9);
-        }
+        let (z_re, z_im) = cdiv(v_re, v_im, i_re, i_im);
+        // S11 vs 50 ohm
+        let (gr, gi) = cdiv(z_re - 50.0, z_im, z_re + 50.0, z_im);
+        let s11_db = 10.0 * (gr * gr + gi * gi).log10();
+        println!("{:14.2} | {:7.1} {:+8.1}j | {:6.2}",
+                 f/1e9, z_re, z_im, s11_db);
     }
 }

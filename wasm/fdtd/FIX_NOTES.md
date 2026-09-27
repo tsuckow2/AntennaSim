@@ -217,6 +217,22 @@ the H-field update around the wire to account for the wire radius and ensure
 proper current conduction. Without this, the wire is "invisible" to propagating
 fields.
 
+**Definitive tests (2026-09-27):**
+- Via k=33-35 vs k=33-34 vs k=33-45: ALL give identical Zin (52.0 − j2813).
+  Via length has ZERO effect → via is disconnected.
+- Via 3x3 vs 1x1: 3x3 gives 52−j2813, 1x1 gives 23.7−j2380. Width affects
+  capacitive coupling but neither conducts as a wire.
+- Source at k=32 vs k=33 (via base): minimal difference (23.7−j2380 vs
+  22.5−j2536). Source-via coupling is not the main issue.
+- Solid 3x3x2 PEC junction block at via-patch: ZERO effect.
+- Distributed source driving via cells directly: WORSE (−j5073). Patch does
+  not respond even with direct drive.
+- Yee stagger: Ex/Ey at (k+½)dz, Ez at k·dz. Patch at 1.575mm (Ex/Ey k=34),
+  via Ez at 1.3125mm (k=34) and 1.8375mm (k=35). No Ez exists AT the patch
+  plane (would require k=34.5). The "upper edge coincident" rule (Boonzaaier
+  & Pistorius) means via top at k=34 (upper edge at 1.575mm), not k=35.
+  But even with correct alignment, the wire does not conduct.
+
 **Impact:** FDTD cannot validate the Snyder patch resonance frequency until
 a thin-wire model is implemented. The resistive source, tight loop, and V/I
 extraction are correct and validated (Re(Z)>0, unit tests pass), but the feed

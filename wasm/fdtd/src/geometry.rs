@@ -52,19 +52,18 @@ pub fn build_snyder(g: &YeeGrid, mat: &mut Materials, dt: f32) -> Feed {
     let pc_i = ((PROBE_X - X0) / DX - 0.5).round() as isize;
     let pc_j = ((0.0 - Y0) / DY - 0.5).round() as isize;
     // 1.3 mm pin ≈ 2.6 cells; use a 3×3-cell staircased block.
-    let pr: isize = 1; // 3x3 via
+    let pr: isize = 1; // 3x3 via (research-recommended)
 
     // k-planes of the PEC sheets (Ex/Ey sample planes).
     let k_ground = 31; // z = 0
     let k_patch = 34; // z = 1.575 mm
-    // Probe z-range in Ez indices. The via's top Ez=0 MUST overlap the
-    // patch Ex/Ey=0 plane at k=34, so it extends to k=35 (z=1.8375mm,
-    // half a cell above the patch). This half-cell extension is the
-    // published fix for Yee wire-end staggering (Boonzaaier & Pistorius
-    // 1992 via Douglas et al. 1998); without it the via is only
-    // capacitively coupled to the patch (measured as −j1100 Ω).
+    // Probe z-range in Ez indices. Per research (Boonzaaier & Pistorius via
+    // Douglas et al.): the via's top Ez=0 cell must have its upper edge
+    // COINCIDENT with the patch Ex/Ey=0 plane. Ez(k) upper edge is at
+    // (k+0.5)*dz+Z0; for k=34 that's exactly 1.575mm = patch plane.
+    // (k=35's upper edge is at 2.1mm, which jumps OVER the plane.)
     let k_probe_lo = 33;
-    let k_probe_hi = 35;
+    let k_probe_hi = 34;
     // Gap/source cell: Ez k=32 (z=0.2625mm), between ground and via.
     let k_src = 32;
 
@@ -230,7 +229,6 @@ pub fn build_snyder(g: &YeeGrid, mat: &mut Materials, dt: f32) -> Feed {
             }
         }
     }
-
     // --- Feed descriptor ---
     let src_i = pc_i as usize;
     let src_j = pc_j as usize;

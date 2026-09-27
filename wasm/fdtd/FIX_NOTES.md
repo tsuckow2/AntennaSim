@@ -240,3 +240,69 @@ cannot deliver current to the patch.
 
 **Next:** Implement Taflove thin-wire subcell model for the probe via, OR use
 an alternative feed (e.g., aperture coupling) that doesn't require a wire.
+
+## External Implementation Comparison (2026-09-27)
+
+### witwin-maxwell — same failure mode
+
+Inspected their patch antenna benchmark:
+- Repo: https://github.com/witwin-ai/witwin-maxwell
+- Assessment: docs/assessments/f2b-quasistatic-benches-acceptance-2026-07-21.md
+- Patch source: benchmark/scenes/antenna/patch.py
+
+Their geometry:
+- Ground at z=0, one-cell lumped-port gap z=0 to dx, PEC probe from z=dx to patch
+- Port-current surface at z=0.5dx in the source gap
+
+Result: NOT a successful reference. Adding the via reduced reactance ~5x but
+Re(Zin) < 4 Ω, still purely capacitive over 2-8 GHz. Patch did not resonate.
+Their diagnosis: "lumped gap remained capacitively shorted by the adjacent PEC."
+Proposed follow-up: "wire-bound clean-gap probe feed" (not implemented; their
+matched-broadside test remains strict-xfail).
+
+This independently reproduces our failure mode. Do not copy as a validated solution.
+
+Note: witwin-maxwell v0.4.0 release notes mention "a subgrid thin-wire conductor
+model with finite conductivity" — but their patch test is still xfail, so the
+thin-wire model does not fix the probe-fed patch.
+
+### openEMS — distributed port topology
+
+From https://github.com/thliebig/openems-project/blob/HEAD/doc-src/concepts/ports.rst:
+
+- "A lumped port is a small 2D surface or 3D cube filled by an electric field"
+- "A lumped port uses a constant-value electric field as the excitation signal"
+- "its physical size must be much smaller than the simulated structure"
+
+Key insight: openEMS lumped ports are DISTRIBUTED (2D surface), not single-cell.
+Our 1-cell source is smaller than openEMS's typical port.
+
+However: openEMS does not publish a validated probe-fed patch benchmark with
+quantitative Zin vs measurement. Their Horn_Antenna.py example uses a pin feed
+through a waveguide, not a microstrip patch probe.
+
+### Distributed 3x3 source experiment (2026-09-27)
+
+Attempted to match openEMS topology: distributed 3x3 Ez source (matching the
+3x3 via cross-section), wide Ampère loop enclosing the 3x3 for current measurement.
+
+Result: NUMERICAL INSTABILITY. All runs (1ns, 10ns) produced NaN impedances.
+The wide loop picks up displacement current, causing Luebbers Thevenin feedback
+(v_term = Vs - I*Rs) to go unstable.
+
+Tried:
+- Wide loop at via plane (k=33): NaN
+- Wide loop at source plane (k=32): NaN  
+- Tight loop (1 cell beyond 3x3): NaN
+
+The 1-cell source with tight 1-cell loop (e925999) is stable but gives wrong
+impedance (-j2800, no resonance). The distributed source is conceptually correct
+but numerically unstable with the Luebbers feedback.
+
+**Verdict:** The probe feed is blocked in Yee FDTD without a proper thin-wire
+subcell model (Taflove). The 3x3 PEC block is not a wire — it's a capacitive
+obstacle. A distributed source does not fix the underlying geometry problem.
+
+### gprMax
+
+Antenna examples use transmission-line feeding, not probe feeds. Not applicable.

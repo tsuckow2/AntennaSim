@@ -306,3 +306,112 @@ obstacle. A distributed source does not fix the underlying geometry problem.
 ### gprMax
 
 Antenna examples use transmission-line feeding, not probe feeds. Not applicable.
+
+### Thin-wire subcell model (2026-09-27)
+
+Implemented the Taflove/Umashankar thin-wire subcell model for the probe.
+
+**Change:** Replaced the 3×3 PEC block via with a 1×1 thin wire (single Ez cell)
+at (pc_i, pc_j, k=33..34). Added `src/thin_wire.rs` with the contour-path
+correction factor:
+
+```text
+factor = ln(R/r0) / ln(R/a)
+```
+
+where R=Δ/2 (0.25mm), r0=0.23Δ (0.115mm, Yee cell equivalent radius),
+a=0.1mm (wire radius). Factor ≈ 0.846.
+
+The 4 H-field components surrounding the wire (Hx at (i0,j0) and (i0,j0-1),
+Hy at (i0,j0) and (i0-1,j0)) have their Ez-difference term scaled by `factor`
+in `update_h`. This accounts for the 1/r static field variation around the
+thin wire, correcting the inductance from the Yee cell's natural r0 to the
+physical wire radius a.
+
+**Rationale:** The 3×3 block (1.5mm) does not conduct in the Yee grid —
+changing its length has zero effect on Zin. The block is a capacitive
+obstacle, not a wire. A 1×1 wire with thin-wire correction allows the
+current to flow from the source (k=32) up through the wire (k=33-34) to
+the patch, with the correct subcell inductance.
+
+**Result (2ns feed_test):** Stable (finite=true), max|I|=5.37e-5 A (current
+flows!), Re(Zin)=73-107 Ω (positive). Reactance still large capacitive
+(-j10k to -j19k) — DFT not converged in 2ns, or wire radius needs tuning.
+
+**Status:** 10ns validation run in progress. The thin-wire model is the
+standard FDTD approach for probe feeds; the 3×3 block was the wrong geometry.
+
+---
+
+## Holland/Simpson Thin-Wire Model (2026-09-28)
+
+### Why the coefficient method was abandoned
+
+The Taflove/Umashankar coefficient-scaling approach (scaling H-field updates
+by `factor = ln(R/r0)/ln(R/a) ≈ 0.8475`) produced a stable but unphysical
+result: Zin ≈ 2700 Ω (purely capacitive, S11 ≈ -0.32 dB) on the Snyder
+geometry. The 10ns Forge run produced NaN across 2-3 GHz.
+
+The fundamental issue: the coefficient method keeps the wire as a PEC cell
+(Ez=0), which blocks conduction current. The H-field correction adjusts
+inductance but does not create a current path. The wire remains an open
+circuit.
+
+### Holland/Simpson formulation
+
+Replaced with the Holland/Simpson (1981) auxiliary wire model, based on the
+witwin-maxwell reference implementation (`AxisAlignedWireReference`):
+
+- The wire is **NOT** a PEC cell. Ez at the wire location evolves normally.
+- The wire is an auxiliary 1D transmission-line system:
+  - Segment currents I (half-step) and node charges q (integer step)
+  - Per-unit-length: L' = μ₀·ln(R/a)/(2π), C' = μ₀ε₀/L'
+  - R = 0.23·dx (coupling distance), a = wire radius
+- Bidirectional coupling:
+  1. Sample EMF from Ez: `EMF = Ez·dz`
+  2. Update current: `I^{n+1/2} = I^{n-1/2} + dt/L·(EMF + V_tail - V_head)`
+  3. Deposit current into Ez: `Ez -= dt·I/(ε₀·dx·dy)` (as part of E^{n+1})
+  4. Update charge: `q^{n+1} = q^n - dt·(I_out - I_in)`
+- Top node tied to 0V when terminating on PEC (patch).
+- Terminal current = bottom-segment wire current (not H-field Ampère loop).
+
+### Stability
+
+The coupled wire-FDTD system requires a stricter CFL than FDTD alone.
+The witwin-maxwell reference computes the exact `2/ω_max` limit from the
+coupled operator eigenvalues.
+
+**Finding:** At 0.99× FDTD CFL, the coupled system is unstable (currents
+blow up to 1e23 within ~130 steps, alternating signs = Nyquist mode).
+At 0.1× FDTD CFL, the system is stable:
+- Dipole fixture (40mm, 1V Gaussian): max|I| = 6.2e-6 A, finite, wire
+  energy 2.8e-18 J. Wire alone (no FDTD) is stable at 0.5× CFL.
+- Snyder 0.5ns test: 11-12 steps/s, no NaN, steady progress.
+
+The 10× timestep reduction is the cost of the partitioned (operator-split)
+coupling. A unified update (wire + E-field stepped together) would allow
+larger steps but requires deeper solver changes.
+
+### Files
+
+- `wasm/fdtd/src/thin_wire.rs`: Rewritten with Holland/Simpson model.
+  `ThinWire::new()` now takes (i0, j0, k_lo, k_hi, dx, dy, dz, radius,
+  top_pec). Methods: `update_current()`, `deposit_current()`, `step()`
+  (deprecated, use the two-phase version).
+- `wasm/fdtd/src/solver.rs`: `Fdtd::step()` calls `wire.update_current()`
+  after `update_h`, then `wire.deposit_current()` after `update_e`.
+  `update_h()` no longer takes a thin-wire parameter (no H-correction).
+  Terminal current is the wire current.
+- `wasm/fdtd/src/geometry.rs`: Removed PEC marking at wire cells (wire
+  is not PEC). Removed H-field correction. `build_snyder()` returns
+  `(Feed, ThinWire)` with the new API.
+- `wasm/fdtd/examples/dipole_fixture.rs`: Canonical dipole validation
+  (two wire arms, center-fed, 0.1× CFL).
+- `wasm/fdtd/examples/wire_isolated.rs`: Wire-alone stability test.
+
+### Status
+
+Implementation complete, unit tests pass (10/10). Dipole fixture validates
+stability and reasonable current. Snyder geometry runs without NaN at
+0.1× CFL. Full 10ns+ validation run pending (requires ~4 hours local at
+11 steps/s, or ~28 hours on Forge at 1 step/s).

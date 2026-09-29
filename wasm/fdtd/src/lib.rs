@@ -19,3 +19,4 @@ pub mod grid;
 pub mod material;
 pub mod solver;
 pub mod source;
+pub mod thin_wire;

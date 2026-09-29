@@ -23,15 +23,15 @@ fn main() {
     assert!((Y0 - -58.0e-3).abs() < 1e-12);
     assert!((Z0 - -31.5 * DZ).abs() < 1e-12);
 
-    let dt = grid.courant_dt(0.99);
+    let dt = grid.courant_dt(0.1);
     println!("grid {NX}x{NY}x{NZ}  dx={DX:.3e} dy={DY:.3e} dz={DZ:.3e}");
-    println!("dt = {dt:.4e} s  (cfl 0.99)");
+    println!("dt = {dt:.4e} s  (cfl 0.1, reduced for Holland/Simpson wire stability)");
 
     let mut mat = Materials::vacuum(NX, NY, NZ, dt);
-    let feed = build_snyder(&grid, &mut mat, dt);
+    let (feed, thin_wire) = build_snyder(&grid, &mut mat, dt);
     println!(
-        "source Ez cell ({},{},{})  loop k={}",
-        feed.src_i, feed.src_j, feed.src_k, feed.k_loop
+        "source Ez cell ({},{},{})  loop k={}  wire segments={}",
+        feed.src_i, feed.src_j, feed.src_k, feed.k_loop, thin_wire.n_segments
     );
 
     let cpml = Cpml::new(&grid, 8, dt);
@@ -40,7 +40,17 @@ fn main() {
     let freqs: Vec<f64> = (0..=100).map(|m| 2.0e9 + m as f64 * 10e6).collect();
     let probe = DftProbe::new(freqs.clone(), dt);
 
-    let mut sim = Fdtd::new(grid, mat, cpml, dt, feed, source, rsource, probe);
+    let mut sim = Fdtd::new(
+        grid,
+        mat,
+        cpml,
+        dt,
+        feed,
+        source,
+        rsource,
+        probe,
+        Some(thin_wire),
+    );
     let n_steps = (t_end / dt).ceil() as usize;
     println!("running {n_steps} steps ({t_end_ns} ns)...");
     let t_start = std::time::Instant::now();

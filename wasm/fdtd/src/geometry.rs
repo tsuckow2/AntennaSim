@@ -15,6 +15,7 @@
 use crate::grid::YeeGrid;
 use crate::material::Materials;
 use crate::source::Feed;
+use crate::thin_wire::ThinWire;
 
 pub const DX: f32 = 0.5e-3;
 pub const DY: f32 = 0.5e-3;
@@ -38,8 +39,8 @@ const EPS_R: f32 = 4.4;
 const LOSS_TANGENT: f32 = 0.02;
 const F0: f32 = 2.5e9; // conductivity evaluated here
 
-/// Voxelize the Snyder patch into `mat`. Returns the feed descriptor.
-pub fn build_snyder(g: &YeeGrid, mat: &mut Materials, dt: f32) -> Feed {
+/// Voxelize the Snyder patch into `mat`. Returns the feed descriptor and thin-wire model.
+pub fn build_snyder(g: &YeeGrid, mat: &mut Materials, dt: f32) -> (Feed, ThinWire) {
     assert!((g.dx - DX).abs() < 1e-9 && (g.dy - DY).abs() < 1e-9 && (g.dz - DZ).abs() < 1e-9);
     let eps0 = 8.854_187_817e-12f32;
     let sigma_sub = 2.0 * std::f32::consts::PI * F0 * eps0 * EPS_R * LOSS_TANGENT;
@@ -51,8 +52,9 @@ pub fn build_snyder(g: &YeeGrid, mat: &mut Materials, dt: f32) -> Feed {
     // Probe footprint in Ez indices (cell-centered x,y).
     let pc_i = ((PROBE_X - X0) / DX - 0.5).round() as isize;
     let pc_j = ((0.0 - Y0) / DY - 0.5).round() as isize;
-    // 1.3 mm pin ≈ 2.6 cells; use a 3×3-cell staircased block.
-    let pr: isize = 1; // 3x3 via (research-recommended)
+    // Thin-wire model: single-cell (1×1) wire instead of 3×3 block.
+    // The Taflove/Umashankar correction accounts for the wire radius.
+    let pr: isize = 0; // 1x1 thin wire (was 3x3 block)
 
     // k-planes of the PEC sheets (Ex/Ey sample planes).
     let k_ground = 31; // z = 0
@@ -198,46 +200,38 @@ pub fn build_snyder(g: &YeeGrid, mat: &mut Materials, dt: f32) -> Feed {
         }
     }
 
-    // --- Probe PEC block (Ez inside; side-wall Ex/Ey) ---
+    // --- Probe thin wire (Holland/Simpson subcell model) ---
+    // The wire is NOT a PEC cell. The Holland/Simpson model represents it as
+    // an auxiliary 1D transmission-line system coupled bidirectionally to the
+    // FDTD grid (samples Ez EMF, deposits current back). No side-wall Ex/Ey
+    // PEC (thin wire has no resolved side walls).
     let pi0 = (pc_i - pr).max(0) as usize;
-    let pi1 = (pc_i + pr).min(g.nx as isize - 1) as usize;
     let pj0 = (pc_j - pr).max(0) as usize;
-    let pj1 = (pc_j + pr).min(g.ny as isize - 1) as usize;
-    for k in k_probe_lo..=k_probe_hi {
-        for j in pj0..=pj1 {
-            for i in pi0..=pi1 {
-                mat.set_pec(2, g.ez_idx(i, j, k));
-            }
-        }
-    }
-    // Side walls: Ex at i = pi0/pi1+1 faces, Ey at j = pj0/pj1+1 faces.
-    for k in k_ground..=k_patch {
-        let zc = (k as f32 + 0.5) * DZ + Z0;
-        if zc < 0.4e-3 || zc > SUB_H {
-            continue;
-        }
-        for j in pj0..=pj1 {
-            mat.set_pec(0, g.ex_idx(pi0, j, k));
-            if pi1 + 1 <= g.nx {
-                mat.set_pec(0, g.ex_idx(pi1 + 1, j, k));
-            }
-        }
-        for i in pi0..=pi1 {
-            mat.set_pec(1, g.ey_idx(i, pj0, k));
-            if pj1 + 1 <= g.ny {
-                mat.set_pec(1, g.ey_idx(i, pj1 + 1, k));
-            }
-        }
-    }
+    // Thin-wire model for the probe. Physical probe is 1.3mm square, but
+    // the thin-wire subcell model requires a < Δ/2. Using a=0.1mm as a
+    // starting point.
+    const WIRE_RADIUS: f32 = 0.1e-3; // 0.1 mm
+    let thin_wire = ThinWire::new(
+        pi0, // i0 (pc_i since pr=0)
+        pj0, // j0 (pc_j since pr=0)
+        k_probe_lo,
+        k_probe_hi,
+        DX,
+        DY,
+        DZ,
+        WIRE_RADIUS,
+        true, // top terminates on the patch (PEC, V=0)
+    );
     // --- Feed descriptor ---
     let src_i = pc_i as usize;
     let src_j = pc_j as usize;
-    // Ampère loop at the gap H-plane, enclosing the probe block.
+    // Ampère loop at the gap H-plane, enclosing the probe.
+    // (pi0,pj0) is the wire cell; loop extends ±2 cells around it.
     let li0 = pi0.saturating_sub(2);
-    let li1 = (pi1 + 3).min(g.nx);
+    let li1 = (pi0 + 3).min(g.nx);
     let lj0 = pj0.saturating_sub(2);
-    let lj1 = (pj1 + 3).min(g.ny);
-    Feed {
+    let lj1 = (pj0 + 3).min(g.ny);
+    let feed = Feed {
         src_i,
         src_j,
         src_k: k_src,
@@ -250,5 +244,6 @@ pub fn build_snyder(g: &YeeGrid, mat: &mut Materials, dt: f32) -> Feed {
         hy_i_hi: li1.min(g.nx),
         hy_j0: lj0,
         hy_j1: lj1,
-    }
+    };
+    (feed, thin_wire)
 }

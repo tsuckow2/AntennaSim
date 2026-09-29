@@ -9,6 +9,7 @@ use crate::cpml::Cpml;
 use crate::grid::YeeGrid;
 use crate::material::Materials;
 use crate::source::{DftProbe, Feed, GaussianSource, ResistiveSource};
+use crate::thin_wire::ThinWire;
 
 pub struct Fdtd {
     pub grid: YeeGrid,
@@ -19,6 +20,7 @@ pub struct Fdtd {
     pub source: GaussianSource,
     pub rsource: ResistiveSource,
     pub probe: DftProbe,
+    pub thin_wire: Option<ThinWire>,
     t: f32,
     step: usize,
 }
@@ -33,6 +35,7 @@ impl Fdtd {
         source: GaussianSource,
         rsource: ResistiveSource,
         probe: DftProbe,
+        thin_wire: Option<ThinWire>,
     ) -> Self {
         Self {
             grid,
@@ -43,34 +46,55 @@ impl Fdtd {
             source,
             rsource,
             probe,
+            thin_wire,
             t: 0.0,
             step: 0,
         }
     }
 
-    /// One full step: H^{n+½}, then E^{n+1}, then resistive source + DFT.
+    /// One full step: H^{n+½}, wire current, E^{n+1}, wire deposition, source + DFT.
     ///
-    /// Luebbers source sequencing: measure the tight-loop current I_s at
-    /// the H-step, run the ordinary E update, enforce PEC, then overwrite
-    /// the source cell with E_z = −V_s/dz + I_s·Rs/dz. Record the ACTUAL
-    /// gap voltage V = −E_z·dz (never the prescribed V_s) with I_s.
+    /// With the Holland/Simpson thin-wire model, the terminal current is the
+    /// wire's bottom-segment current (not the H-field Ampère loop).
+    ///
+    /// Leapfrog sequence:
+    /// 1. H^{n+1/2} from E^n (update_h)
+    /// 2. I^{n+1/2} from E^n and q^n (wire.update_current)
+    /// 3. E^{n+1} = E^n + dt/eps*curl(H^{n+1/2}) (update_e)
+    /// 4. E^{n+1} -= dt*I^{n+1/2}/(eps*dx*dy) (wire.deposit_current)
+    /// 5. q^{n+1} from I^{n+1/2} (done in wire.update_current)
+    ///
+    /// Luebbers source sequencing otherwise: enforce PEC, then overwrite the
+    /// source cell with E_z = −V_s/dz + I_s·Rs/dz. Record the ACTUAL gap
+    /// voltage V = −E_z·dz (never the prescribed V_s) with I_s.
     pub fn step(&mut self) {
         let dt = self.dt;
         update_h(&mut self.grid, dt);
         self.cpml.correct_h(&mut self.grid, dt);
 
-        // Terminal current at the H-step (tight 1-cell loop, +z upward).
-        let i_up = self.feed.measure_i_tight(&self.grid);
+        // Thin-wire: advance current from E^n (does not modify grid yet).
+        let i_wire = if let Some(ref mut tw) = self.thin_wire {
+            tw.update_current(&self.grid, dt)
+        } else {
+            // No wire: fall back to the H-field Ampère loop.
+            self.feed.measure_i_tight(&self.grid)
+        };
 
         update_e(&mut self.grid, &self.mat);
         self.cpml
             .correct_e(&mut self.grid, &self.mat.cb_x, &self.mat.cb_y, &self.mat.cb_z);
+
+        // Thin-wire: deposit I^{n+1/2} into E^{n+1} as a current source.
+        if let Some(ref tw) = self.thin_wire {
+            tw.deposit_current(&mut self.grid, dt);
+        }
+
         apply_pec(&mut self.grid, &self.mat);
 
         // Resistive source at the gap cell (E-step time).
         self.t += dt;
         let vs = self.source.value(self.t);
-        let (v_term, i_term) = self.rsource.apply(&mut self.grid, &self.feed, vs, i_up);
+        let (v_term, i_term) = self.rsource.apply(&mut self.grid, &self.feed, vs, i_wire);
         self.probe.push(v_term, i_term);
 
         self.step += 1;
@@ -97,6 +121,9 @@ impl Fdtd {
 /// - Hy(i,j,k) −= c·[(Ez(i)−Ez(i−1))/dx − (Ex(k)−Ex(k−1))/dz]
 /// - Hz(i,j,k) −= c·[(Ex(j)−Ex(j−1))/dy − (Ey(i)−Ey(i−1))/dx]
 /// Out-of-bounds E = 0.
+///
+/// Standard Yee update (no thin-wire H correction; the Holland/Simpson wire
+/// couples via the E-field, not via modified H updates).
 pub fn update_h(g: &mut YeeGrid, dt: f32) {
     let mu0 = 4.0e-7 * std::f32::consts::PI;
     let c = dt / mu0;

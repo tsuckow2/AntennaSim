@@ -15,6 +15,8 @@
 
 pub mod cpml;
 pub mod geometry;
+#[cfg(feature = "gpu")]
+pub mod gpu;
 pub mod grid;
 pub mod material;
 pub mod solver;

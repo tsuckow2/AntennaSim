@@ -57,3 +57,6 @@ frontend/public/wasm/nec2c.wasm
 *.bak
 *.tmp
 pkg-mt/
+
+# Rust build output
+target/

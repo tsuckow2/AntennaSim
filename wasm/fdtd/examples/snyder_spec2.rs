@@ -8,7 +8,7 @@
 //! Usage: `cargo run --release --example snyder_spec2 -- [t_ns]`
 
 use fdtd::cpml::Cpml;
-use fdtd::geometry::{build_snyder, DX, DY, DZ, NX, NY, NZ};
+use fdtd::geometry::{build_snyder_wire, DX, DY, DZ, NX, NY, NZ};
 use fdtd::grid::YeeGrid;
 use fdtd::material::Materials;
 use fdtd::solver::Fdtd;
@@ -67,7 +67,7 @@ fn main() {
     let grid = YeeGrid::new(NX, NY, NZ, DX, DY, DZ);
     let dt = grid.courant_dt(0.1);
     let mut mat = Materials::vacuum(NX, NY, NZ, dt);
-    let (feed, _tw) = build_snyder(&grid, &mut mat, dt);
+    let (feed, _tw) = build_snyder_wire(&grid, &mut mat, dt);
     let (pi, pj) = (feed.src_i, feed.src_j);
     for (di, dj) in [(0isize, 0isize), (1, 0), (-1, 0), (0, 1), (0, -1)] {
         let (ii, jj) = ((pi as isize + di) as usize, (pj as isize + dj) as usize);

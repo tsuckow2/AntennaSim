@@ -24,7 +24,7 @@
 //! Usage: `cargo run --release --example snyder_diag -- [t_end_ns]`
 
 use fdtd::cpml::Cpml;
-use fdtd::geometry::{build_snyder, DX, DY, DZ, NX, NY, NZ};
+use fdtd::geometry::{build_snyder_wire, DX, DY, DZ, NX, NY, NZ};
 use fdtd::grid::YeeGrid;
 use fdtd::material::Materials;
 use fdtd::solver::Fdtd;
@@ -44,7 +44,7 @@ fn main() {
         .unwrap_or(0.1);
     let dt = grid.courant_dt(cfl);
     let mut mat = Materials::vacuum(NX, NY, NZ, dt);
-    let (feed, thin_wire) = build_snyder(&grid, &mut mat, dt);
+    let (feed, thin_wire) = build_snyder_wire(&grid, &mut mat, dt);
     let (pi, pj) = (feed.src_i, feed.src_j);
     // SNYDER_POST=1: replace the Holland/Simpson filament (a=0.1mm —
     // the physical probe is a 1.3mm square pin, unrepresentable in

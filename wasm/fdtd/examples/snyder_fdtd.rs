@@ -4,7 +4,7 @@
 //! Prints a table of frequency, Zin, |S11| dB at 2.0–3.0 GHz.
 
 use fdtd::cpml::Cpml;
-use fdtd::geometry::{build_snyder, DX, DY, DZ, NX, NY, NZ, X0, Y0, Z0};
+use fdtd::geometry::{build_snyder_wire, DX, DY, DZ, NX, NY, NZ, X0, Y0, Z0};
 use fdtd::grid::YeeGrid;
 use fdtd::material::Materials;
 use fdtd::solver::Fdtd;
@@ -28,7 +28,7 @@ fn main() {
     println!("dt = {dt:.4e} s  (cfl 0.1, reduced for Holland/Simpson wire stability)");
 
     let mut mat = Materials::vacuum(NX, NY, NZ, dt);
-    let (feed, thin_wire) = build_snyder(&grid, &mut mat, dt);
+    let (feed, thin_wire) = build_snyder_wire(&grid, &mut mat, dt);
     println!(
         "source Ez cell ({},{},{})  loop k={}  wire segments={}",
         feed.src_i, feed.src_j, feed.src_k, feed.k_loop, thin_wire.n_segments

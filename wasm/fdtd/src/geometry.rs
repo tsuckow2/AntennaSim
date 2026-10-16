@@ -2,15 +2,28 @@
 //!
 //! Geometry (from `frontend/scripts/snyder-layer-sweep.ts`):
 //! - FR-4 substrate: 101.6 × 101.6 × 1.575 mm, εr = 4.4, tanδ = 0.02
-//! - Ground: zero-thickness PEC sheet at z = 0 (101.6 × 101.6 mm)
+//! - Ground: PEC at z = 0 (101.6 × 101.6 mm)
 //! - Patch: zero-thickness PEC sheet at z = 1.575 mm (28.2084 × 37.5789 mm)
 //! - Probe: 1.3 mm square copper pin at x = −6.5384 mm, z ∈ [0.525, 1.575] mm
 //! - Feed gap: 1 cell (dz = 0.525 mm) between ground and probe bottom;
 //!   the FEM's 0.5 mm gap is snapped to the grid.
 //!
+//! Two feed/ground constructions share the substrate and sheets:
+//! - `build_snyder` (production): a grid-faithful PEC post (Ez PEC in a
+//!   plus-cross at the probe column) driven by the Norton gap port, over
+//!   a VOLUMETRIC ground (Ez PEC at k=30 and k=31). The original
+//!   sheet ground mirrors the gap cell's Ez across its plane
+//!   (Ez(k=31) ≈ −Ez(k=32)), cancelling the port voltage — the cavity
+//!   saw ~1% of the drive (see snyder_diag / MEMORY.md). The post
+//!   delivers ~370× the port energy of the thin wire on this grid.
+//! - `build_snyder_wire`: the original Holland/Simpson thin-wire probe
+//!   (0.1 mm filament — it cannot represent the 1.3 mm pin on a
+//!   0.5 mm grid) over the zero-thickness sheet ground. Retained for
+//!   comparison studies; the wire-era drivers use it explicitly.
+//!
 //! Grid: dx = dy = 0.5 mm, dz = 0.525 mm (3 cells = 1.575 mm exactly, so
-//! both PEC sheets land on Ex/Ey sample planes). Domain ±66 mm in x/y,
-//! z ∈ [−16.5375, 16.5375] mm (63 cells), 8-cell CPML on all faces.
+//! both PEC sheets land on Ex/Ey sample planes). Domain ±58 mm in x/y,
+//! z ∈ [−16.5375, 15.4875] mm (61 cells).
 
 use crate::grid::YeeGrid;
 use crate::material::Materials;
@@ -39,8 +52,27 @@ const EPS_R: f32 = 4.4;
 const LOSS_TANGENT: f32 = 0.02;
 const F0: f32 = 2.5e9; // conductivity evaluated here
 
-/// Voxelize the Snyder patch into `mat`. Returns the feed descriptor and thin-wire model.
-pub fn build_snyder(g: &YeeGrid, mat: &mut Materials, dt: f32) -> (Feed, ThinWire) {
+/// Voxelize the Snyder patch into `mat` (production construction):
+/// PEC post + Norton gap port over a volumetric ground. Returns the
+/// feed descriptor and no thin wire.
+pub fn build_snyder(g: &YeeGrid, mat: &mut Materials, dt: f32) -> (Feed, Option<ThinWire>) {
+    let (feed, _) = build_snyder_impl(g, mat, dt, true);
+    (feed, None)
+}
+
+/// The original thin-wire construction: Holland/Simpson filament over
+/// the zero-thickness sheet ground. Retained for comparison studies.
+pub fn build_snyder_wire(g: &YeeGrid, mat: &mut Materials, dt: f32) -> (Feed, ThinWire) {
+    let (feed, wire) = build_snyder_impl(g, mat, dt, false);
+    (feed, wire.expect("wire construction returns a wire"))
+}
+
+fn build_snyder_impl(
+    g: &YeeGrid,
+    mat: &mut Materials,
+    dt: f32,
+    production: bool,
+) -> (Feed, Option<ThinWire>) {
     assert!((g.dx - DX).abs() < 1e-9 && (g.dy - DY).abs() < 1e-9 && (g.dz - DZ).abs() < 1e-9);
     let eps0 = 8.854_187_817e-12f32;
     let sigma_sub = 2.0 * std::f32::consts::PI * F0 * eps0 * EPS_R * LOSS_TANGENT;
@@ -200,33 +232,59 @@ pub fn build_snyder(g: &YeeGrid, mat: &mut Materials, dt: f32) -> (Feed, ThinWir
         }
     }
 
-    // --- Probe thin wire (Holland/Simpson subcell model) ---
-    // The wire is NOT a PEC cell. The Holland/Simpson model represents it as
-    // an auxiliary 1D transmission-line system coupled bidirectionally to the
-    // FDTD grid (samples Ez EMF, deposits current back). No side-wall Ex/Ey
-    // PEC (thin wire has no resolved side walls).
-    let pi0 = (pc_i - pr).max(0) as usize;
-    let pj0 = (pc_j - pr).max(0) as usize;
-    // Thin-wire model for the probe. Physical probe is 1.3mm square, but
-    // the thin-wire subcell model requires a < Δ/2. Using a=0.1mm as a
-    // starting point.
-    const WIRE_RADIUS: f32 = 0.1e-3; // 0.1 mm
-    let thin_wire = ThinWire::new(
-        pi0, // i0 (pc_i since pr=0)
-        pj0, // j0 (pc_j since pr=0)
-        k_probe_lo,
-        k_probe_hi,
-        DX,
-        DY,
-        DZ,
-        WIRE_RADIUS,
-        true, // top terminates on the patch (PEC, V=0)
-    );
+    let thin_wire = if production {
+        // --- PEC post (production feed) ---
+        // Ez PEC in a plus-cross at the probe column, k_probe_lo..=hi —
+        // the voxelized 1.3 mm pin. The Norton source drives the gap
+        // cell below it (k_src) against the volumetric ground.
+        for (di, dj) in [(0isize, 0isize), (1, 0), (-1, 0), (0, 1), (0, -1)] {
+            let ii = (pc_i + di) as usize;
+            let jj = (pc_j + dj) as usize;
+            for k in k_probe_lo..=k_probe_hi {
+                mat.set_pec(2, g.ez_idx(ii, jj, k));
+            }
+        }
+        // --- Volumetric ground ---
+        // Ez PEC at k=30 and k=31 over the ground footprint: kills the
+        // sheet's mirror image of the gap cell (see module docs).
+        for j in 14..218usize {
+            for i in 14..218usize {
+                mat.set_pec(2, g.ez_idx(i, j, k_ground));
+                mat.set_pec(2, g.ez_idx(i, j, k_ground - 1));
+            }
+        }
+        None
+    } else {
+        // --- Probe thin wire (Holland/Simpson subcell model) ---
+        // The wire is NOT a PEC cell. The Holland/Simpson model represents it as
+        // an auxiliary 1D transmission-line system coupled bidirectionally to the
+        // FDTD grid (samples Ez EMF, deposits current back). No side-wall Ex/Ey
+        // PEC (thin wire has no resolved side walls).
+        let pi0 = (pc_i - pr).max(0) as usize;
+        let pj0 = (pc_j - pr).max(0) as usize;
+        // Thin-wire model for the probe. Physical probe is 1.3mm square, but
+        // the thin-wire subcell model requires a < Δ/2. Using a=0.1mm as a
+        // starting point.
+        const WIRE_RADIUS: f32 = 0.1e-3; // 0.1 mm
+        Some(ThinWire::new(
+            pi0, // i0 (pc_i since pr=0)
+            pj0, // j0 (pc_j since pr=0)
+            k_probe_lo,
+            k_probe_hi,
+            DX,
+            DY,
+            DZ,
+            WIRE_RADIUS,
+            true, // top terminates on the patch (PEC, V=0)
+        ))
+    };
     // --- Feed descriptor ---
     let src_i = pc_i as usize;
     let src_j = pc_j as usize;
     // Ampère loop at the gap H-plane, enclosing the probe.
-    // (pi0,pj0) is the wire cell; loop extends ±2 cells around it.
+    // (pc_i,pc_j) is the probe cell; loop extends ±2 cells around it.
+    let pi0 = pc_i.max(0) as usize;
+    let pj0 = pc_j.max(0) as usize;
     let li0 = pi0.saturating_sub(2);
     let li1 = (pi0 + 3).min(g.nx);
     let lj0 = pj0.saturating_sub(2);
@@ -246,4 +304,50 @@ pub fn build_snyder(g: &YeeGrid, mat: &mut Materials, dt: f32) -> (Feed, ThinWir
         hy_j1: lj1,
     };
     (feed, thin_wire)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sums(mat: &Materials) -> (f64, f64, usize, usize, usize) {
+        let s = |v: &Vec<f32>| v.iter().map(|&x| x as f64).sum::<f64>();
+        let c = |v: &Vec<u8>| v.iter().filter(|&&x| x != 0).count();
+        (s(&mat.ca_x), s(&mat.cb_z), c(&mat.pec_x), c(&mat.pec_y), c(&mat.pec_z))
+    }
+
+    /// Production geometry must reproduce the validated reference
+    /// construction (examples/snyder_ref.rs checksums at CFL 0.1,
+    /// matched exactly by the WebGPU builder): PEC post + volumetric
+    /// ground over the shared substrate/sheets.
+    #[test]
+    fn production_snyder_matches_reference_checksums() {
+        let g = YeeGrid::new(NX, NY, NZ, DX, DY, DZ);
+        let dt = g.courant_dt(0.1);
+        let mut mat = Materials::vacuum(NX, NY, NZ, dt);
+        let (feed, wire) = build_snyder(&g, &mut mat, dt);
+        assert!(wire.is_none());
+        assert_eq!((feed.src_i, feed.src_j, feed.src_k), (102, 115, 32));
+        let (ca_x, cb_z, pec_x, pec_y, pec_z) = sums(&mat);
+        assert_eq!((pec_x, pec_y, pec_z), (45744, 45612, 83242));
+        assert!((ca_x - 3.297412e6).abs() / 3.297412e6 < 1e-5, "ca_x {ca_x}");
+        assert!((cb_z - 3.580207e4).abs() / 3.580207e4 < 1e-5, "cb_z {cb_z}");
+    }
+
+    /// The wire variant keeps the sheet ground: no Ez PEC anywhere
+    /// (the post's 10 cells + the thick ground's 83,232 are absent),
+    /// and the same substrate/sheets/feed as production.
+    #[test]
+    fn wire_variant_keeps_sheet_ground() {
+        let g = YeeGrid::new(NX, NY, NZ, DX, DY, DZ);
+        let dt = g.courant_dt(0.1);
+        let mut mat = Materials::vacuum(NX, NY, NZ, dt);
+        let (feed, wire) = build_snyder_wire(&g, &mut mat, dt);
+        assert_eq!((feed.src_i, feed.src_j, feed.src_k), (102, 115, 32));
+        assert_eq!(wire.n_segments, 2);
+        let (ca_x, cb_z, pec_x, pec_y, pec_z) = sums(&mat);
+        assert_eq!((pec_x, pec_y, pec_z), (45744, 45612, 0));
+        assert!((ca_x - 3.297412e6).abs() / 3.297412e6 < 1e-5, "ca_x {ca_x}");
+        assert!((cb_z - 3.580207e4).abs() / 3.580207e4 < 1e-5, "cb_z {cb_z}");
+    }
 }

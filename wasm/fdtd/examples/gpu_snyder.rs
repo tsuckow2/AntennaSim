@@ -26,7 +26,7 @@ fn build_cpu() -> (Fdtd, f32, Vec<f64>) {
         .unwrap_or(0.2);
     let dt = grid.courant_dt(cfl);
     let mut mat = Materials::vacuum(NX, NY, NZ, dt);
-    let (feed, thin_wire) = build_snyder(&grid, &mut mat, dt);
+    let (feed, thin_wire) = build_snyder_wire(&grid, &mut mat, dt);
     // SNYDER_POST=1: grid-faithful PEC post + Norton gap port instead
     // of the thin-wire filament (same option as snyder_diag.rs).
     let wire_arg = if std::env::var("SNYDER_POST").is_ok() {

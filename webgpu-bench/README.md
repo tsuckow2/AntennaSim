@@ -7,7 +7,7 @@ https://webgpu.muse-workspace.g.codingwell.net (Forge, `/var/www/webgpu`).
 
 ## What's here
 
-- `index.html` — the assembled, deployable page (v5.7). Do not edit by
+- `index.html` — the assembled, deployable page (v5.9). Do not edit by
   hand; rebuild it (below).
 - `build/template.html` — the page shell (UI, agent long-poll, manual
   parity/bench jobs).
@@ -21,8 +21,8 @@ https://webgpu.muse-workspace.g.codingwell.net (Forge, `/var/www/webgpu`).
   references in `wasm/fdtd/examples/snyder_ref*.rs`), per-entry-point
   minimal bind-group layouts (≤8 storage buffers — the WebGPU floor),
   native step order, and a Goertzel DFT producing Zin/S11 tables.
-  Config: `{post, thick, zref|zref2|zref3}` selects the feed/ground
-  variant and the z-refinement ladder rung.
+  Config: `{post, thick, zref|zref2|zref3, cfl}` selects the feed/ground
+  variant and the z-refinement ladder rung; `cfl` defaults to 0.2.
 - `build/build_v5.py` — assembles `index.html` from the template +
   shaders + core.
 - `relay/` — `relay.py` (job relay service on Forge, 127.0.0.1:8177,

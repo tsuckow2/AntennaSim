@@ -130,7 +130,7 @@ function cpuStep(f, nx, ny, nz, p) {
 // Page state
 // ---------------------------------------------------------------------------
 const $ = id => document.getElementById(id);
-const PAGE_VERSION = 'v5.7';
+const PAGE_VERSION = 'v5.9';
 const results = { page: 'webgpu-fdtd-test-bench', version: 2, pageVersion: PAGE_VERSION, runs: [] };
 let adapter = null, device = null, adapterSnapshot = null;
 let stopRequested = false;
@@ -476,7 +476,7 @@ const F = Math.fround;
 // (3 substrate layers); zref: dz/2 (6 layers); zref2: dz/4 (12);
 // zref3: dz/8 (24). k-planes follow Z0 = -(k_ground + 0.5) * dz; the
 // post starts one Ez sample above the source cell in every variant.
-function snyderGeom(variant) {
+function snyderGeom(variant, cfl) {
   const LADDER = {
     '': { dz: 5.25e-4, nz: 61, kg: 31, layers: 3 },
     zref: { dz: 2.625e-4, nz: 123, kg: 63, layers: 6 },
@@ -492,7 +492,7 @@ function snyderGeom(variant) {
   const Z0 = F(-(kGround + 0.5) * DZ);
   const EPS0 = F(8.854187817e-12);
   const inv = F(Math.sqrt(F(F(1 / F(DX * DX)) + F(1 / F(DY * DY))) + F(1 / F(DZ * DZ))));
-  const dt = F(0.1 / F(F(299792458.0) * inv));
+  const dt = F((cfl || 0.2) / F(F(299792458.0) * inv));
   return {
     DX, DY, DZ, NX, NY, NZ, X0, Y0, Z0, EPS0, dt, kGround,
     kPatch: kGround + subLayers, kSrc: kGround + 1,
@@ -500,7 +500,7 @@ function snyderGeom(variant) {
     thickA: kGround, thickB: kGround - 1,
   };
 }
-const SNY = snyderGeom('');
+const SNY = snyderGeom('', 0.1);
 const exIdx = (i, j, k) => (k * SNY.NY + j) * (SNY.NX + 1) + i;
 const eyIdx = (i, j, k) => (k * (SNY.NY + 1) + j) * SNY.NX + i;
 const ezIdx = (i, j, k) => (k * SNY.NY + j) * SNY.NX + i;
@@ -509,7 +509,7 @@ const hyIdx = (i, j, k) => (k * SNY.NY + j) * (SNY.NX + 1) + i;
 const hzIdx = (i, j, k) => (k * (SNY.NY + 1) + j) * (SNY.NX + 1) + i;
 
 function buildSnyderSolver(cfg) {
-  const G = snyderGeom(cfg.zref3 ? 'zref3' : cfg.zref2 ? 'zref2' : cfg.zref ? 'zref' : '');
+  const G = snyderGeom(cfg.zref3 ? 'zref3' : cfg.zref2 ? 'zref2' : cfg.zref ? 'zref' : '', cfg.cfl);
   const { NX, NY, NZ, DX, DY, DZ, X0, Y0, Z0, EPS0, dt } = G;
   const SUB_H = F(1.575e-3), subHalf = F(F(101.6e-3) / 2);
   const patchHx = F(F(28.2084e-3) / 2), patchHy = F(F(37.5789e-3) / 2);

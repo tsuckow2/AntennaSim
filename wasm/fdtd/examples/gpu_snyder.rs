@@ -8,7 +8,7 @@
 //!                                 Zin/S11 table like snyder_fdtd.rs.
 //!
 //! Both build the exact Snyder configuration of snyder_fdtd.rs
-//! (0.5 mm grid, dt = 0.1×CFL, CPML 8, Gaussian peak 2.5 GHz, Rs = 50 Ω).
+//! (0.5 mm grid, dt = 0.2×CFL by default (GPU_CFL), CPML 8, Gaussian peak 2.5 GHz, Rs = 50 Ω).
 
 use fdtd::cpml::Cpml;
 use fdtd::geometry::*;
@@ -23,7 +23,7 @@ fn build_cpu() -> (Fdtd, f32, Vec<f64>) {
     let cfl: f32 = std::env::var("GPU_CFL")
         .ok()
         .and_then(|s| s.parse().ok())
-        .unwrap_or(0.1);
+        .unwrap_or(0.2);
     let dt = grid.courant_dt(cfl);
     let mut mat = Materials::vacuum(NX, NY, NZ, dt);
     let (feed, thin_wire) = build_snyder(&grid, &mut mat, dt);

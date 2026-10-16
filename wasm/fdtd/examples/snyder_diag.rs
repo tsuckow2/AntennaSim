@@ -38,7 +38,11 @@ fn main() {
     let t_end = t_end_ns * 1e-9;
 
     let grid = YeeGrid::new(NX, NY, NZ, DX, DY, DZ);
-    let dt = grid.courant_dt(0.1);
+    let cfl: f32 = std::env::var("SNYDER_CFL")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0.1);
+    let dt = grid.courant_dt(cfl);
     let mut mat = Materials::vacuum(NX, NY, NZ, dt);
     let (feed, thin_wire) = build_snyder(&grid, &mut mat, dt);
     let (pi, pj) = (feed.src_i, feed.src_j);

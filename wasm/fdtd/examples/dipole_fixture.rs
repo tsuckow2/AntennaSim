@@ -82,7 +82,9 @@ fn main() {
         let i_bot = wire_bot.update_current(&grid, dt);
         let _i_top = wire_top.update_current(&grid, dt);
         // Terminal current: bottom arm current at the gap.
-        let i_term = i_bot;
+        // (update_current returns (I_bottom, V_base) since the
+        // base-node source fix.)
+        let i_term = i_bot.0;
         max_i = max_i.max(i_term.abs());
 
         // E update.
@@ -91,8 +93,8 @@ fn main() {
         cpml.correct_e(&mut grid, &mat.cb_x, &mat.cb_y, &cb);
 
         // 2. Deposit wire currents into E^{n+1}.
-        wire_bot.deposit_current(&mut grid, dt);
-        wire_top.deposit_current(&mut grid, dt);
+        wire_bot.deposit_current(&mut grid, &mat);
+        wire_top.deposit_current(&mut grid, &mat);
 
         fdtd::solver::apply_pec(&mut grid, &mat);
 

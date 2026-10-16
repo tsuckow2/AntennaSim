@@ -13,7 +13,7 @@ fn main() {
     let mut grid = YeeGrid::new(232, 232, 61, 0.5e-3, 0.5e-3, 0.525e-3);
     let dt = grid.courant_dt(0.99);
     let mut mat = Materials::vacuum(232, 232, 61, dt);
-    let feed = build_snyder(&grid, &mut mat, dt);
+    let (feed, _thin_wire) = build_snyder(&grid, &mut mat, dt);
 
     let source = GaussianSource::new(2.5e9, 1.0);
     let rsource = ResistiveSource { rs: 50.0 };

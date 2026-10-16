@@ -79,7 +79,7 @@ fn main() {
     println!("dt = {:.3e} s", dt);
     
     let mut mat = Materials::vacuum(NX, NY, NZ, dt);
-    let feed = build_snyder(&grid, &mut mat, dt);
+    let (feed, _thin_wire) = build_snyder(&grid, &mut mat, dt);
     println!("Source at ({}, {}, {})", feed.src_i, feed.src_j, feed.src_k);
     
     // Add absorber (replaces CPML)

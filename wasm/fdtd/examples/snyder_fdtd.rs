@@ -34,7 +34,7 @@ fn main() {
         feed.src_i, feed.src_j, feed.src_k, feed.k_loop, thin_wire.n_segments
     );
 
-    let cpml = Cpml::new(&grid, 8, dt);
+    let cpml = Cpml::new(&grid, 12, dt); // npml 12: 8 let a PEC-channel grazing mode grow (see cpml.rs)
     let source = GaussianSource::new(2.5e9, 1.0);
     let rsource = ResistiveSource { rs: 50.0 };
     let freqs: Vec<f64> = (0..=100).map(|m| 2.0e9 + m as f64 * 10e6).collect();

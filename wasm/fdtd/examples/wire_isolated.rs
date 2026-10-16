@@ -3,6 +3,7 @@
 
 use fdtd::thin_wire::ThinWire;
 use fdtd::grid::YeeGrid;
+use fdtd::material::Materials;
 
 fn main() {
     let nx = 10;
@@ -19,6 +20,7 @@ fn main() {
     
     let c0 = 299792458.0;
     let dt = 0.5 * dz / c0;
+    let mat = Materials::vacuum(nx, ny, nz, dt);
     println!("dt = {:.3e}, wire max dt = {:.3e}", dt, wire.max_stable_dt());
     
     // Prescribed EMF: Gaussian pulse on the middle segment.
@@ -42,7 +44,7 @@ fn main() {
         
         // Wire step (no deposition needed for isolation test, but do it).
         let _i = wire.update_current(&grid, dt);
-        wire.deposit_current(&mut grid, dt);
+        wire.deposit_current(&mut grid, &mat);
         
         if step % 200 == 0 {
             let max_i = wire.currents.iter().map(|x| x.abs()).fold(0.0f32, f32::max);

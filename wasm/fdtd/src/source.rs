@@ -47,6 +47,12 @@ impl GaussianSource {
     pub fn tau(&self) -> f32 {
         self.tau
     }
+
+    /// Raw waveform parameters `(v0, t0, tau)` for external backends
+    /// (e.g. the GPU solver) that evaluate the pulse on-device.
+    pub fn params(&self) -> (f32, f32, f32) {
+        (self.v0, self.t0, self.tau)
+    }
 }
 
 /// Feed geometry: gap (source) cell and Ampère-loop ranges.
@@ -94,10 +100,16 @@ impl Feed {
     /// the wide loop above here (it picks up return/displacement currents).
     pub fn measure_i_tight(&self, g: &YeeGrid) -> f32 {
         let (si, sj, sk) = (self.src_i, self.src_j, self.src_k);
-        let hx_bot = g.hx[g.hx_idx(si, sj, sk)];
-        let hx_top = g.hx[g.hx_idx(si, sj + 1, sk)];
-        let hy_lft = g.hy[g.hy_idx(si, sj, sk)];
-        let hy_rgt = g.hy[g.hy_idx(si + 1, sj, sk)];
+        // The four H faces of the Ez cell itself, per update_e's pairing:
+        // Hx(si,sj−1)/Hx(si,sj) are its −y/+y faces, Hy(si−1,sj)/Hy(si,sj)
+        // its −x/+x faces. (An earlier version sampled (sj, sj+1, si,
+        // si+1) — the loop around the cell CORNER — which cancels the
+        // circulating field and returns a small wrong-sign residual.)
+        // Missing faces at the domain edge read 0, mirroring update_e.
+        let hx_bot = if sj > 0 { g.hx[g.hx_idx(si, sj - 1, sk)] } else { 0.0 };
+        let hx_top = g.hx[g.hx_idx(si, sj, sk)];
+        let hy_lft = if si > 0 { g.hy[g.hy_idx(si - 1, sj, sk)] } else { 0.0 };
+        let hy_rgt = g.hy[g.hy_idx(si, sj, sk)];
         (hx_bot - hx_top) * g.dx + (hy_rgt - hy_lft) * g.dy
     }
 }
@@ -123,6 +135,11 @@ impl DftProbe {
     pub fn push(&mut self, v: f32, i: f32) {
         self.v_series.push(v);
         self.i_series.push(i);
+    }
+
+    /// The recorded (V, I) time series (for cross-backend comparisons).
+    pub fn series(&self) -> (&[f32], &[f32]) {
+        (&self.v_series, &self.i_series)
     }
 
     pub fn len(&self) -> usize {
@@ -223,6 +240,30 @@ impl ResistiveSource {
         let v_term = -g.ez[si] * dz;
         (v_term, i_up)
     }
+
+    /// Norton-form resistive source for the lumped-port (no-wire) path.
+    ///
+    /// The overwrite form (`apply`) feeds the measured loop current back
+    /// through Rs. That current contains the gap cell's own displacement
+    /// current, whose feedback gain ω·C_gap·Rs exceeds 1 at grid
+    /// frequencies and pumps a discrete resonance (observed ×1.02/step
+    /// growth at ω·dt ≈ 0.46 on a 0.381 mm gap cell, at any CFL). The
+    /// Norton form injects the source as an impressed current
+    /// I_src = (Vs − V)/Rs into the cell's natural E update instead:
+    /// explicit negative feedback with gain dt/(C_gap·Rs) ≪ 1, and the
+    /// terminal relation V = Vs − I·Rs holds through the cell dynamics
+    /// (exactly at DC). `cb_src` is the source cell's Cb (= dt/ε),
+    /// used to recover ε for the deposit. Returns V_terminal after the
+    /// deposit; the probe records it with the loop current.
+    pub fn apply_norton(&self, g: &mut YeeGrid, feed: &Feed, vs: f32, dt: f32, cb_src: f32) -> f32 {
+        let si = g.ez_idx(feed.src_i, feed.src_j, feed.src_k);
+        let dz = g.dz;
+        let v_now = -g.ez[si] * dz;
+        let i_src = (vs - v_now) / self.rs;
+        let eps = dt / cb_src;
+        g.ez[si] -= dt * i_src / (eps * g.dx * g.dy);
+        -g.ez[si] * dz
+    }
 }
 
 #[cfg(test)]
@@ -249,8 +290,10 @@ mod tests {
             hy_j1: 2,
         };
         // CCW from +z: bottom +x, top −x, right +y, left −y.
-        let (ib, it) = (g.hx_idx(1, 1, 1), g.hx_idx(1, 2, 1));
-        let (il, ir) = (g.hy_idx(1, 1, 1), g.hy_idx(2, 1, 1));
+        // Faces of Ez(1,1,1) per update_e's pairing: Hx(1,0)=bottom,
+        // Hx(1,1)=top, Hy(0,1)=left, Hy(1,1)=right.
+        let (ib, it) = (g.hx_idx(1, 0, 1), g.hx_idx(1, 1, 1));
+        let (il, ir) = (g.hy_idx(0, 1, 1), g.hy_idx(1, 1, 1));
         g.hx[ib] = 1.0; // bottom
         g.hx[it] = -1.0; // top
         g.hy[il] = -1.0; // left
@@ -291,6 +334,41 @@ mod tests {
             (ez - (-1.0)).abs() < 1e-6,
             "E_z should be −V/dz=−1, got {ez}"
         );
+    }
+
+    #[test]
+    fn resistive_source_norton_charges_toward_vs() {
+        // Norton form: from Ez=0 with Vs=2, Rs=50, the deposit must
+        // drive V_terminal positive toward Vs (partial step: the cell
+        // capacitance charges through Rs), never past it in one step.
+        let mut g = YeeGrid::new(4, 4, 4, 1.0, 1.0, 1.0);
+        let feed = Feed {
+            src_i: 1,
+            src_j: 1,
+            src_k: 1,
+            k_loop: 1,
+            hx_j_lo: 0,
+            hx_j_hi: 2,
+            hx_i0: 0,
+            hx_i1: 2,
+            hy_i_lo: 0,
+            hy_i_hi: 2,
+            hy_j0: 0,
+            hy_j1: 2,
+        };
+        let rsrc = ResistiveSource { rs: 50.0 };
+        let dt = 1e-12f32;
+        let eps0 = 8.854_187_817e-12f32;
+        let cb_src = dt / eps0; // vacuum cell
+        let v = rsrc.apply_norton(&mut g, &feed, 2.0, dt, cb_src);
+        assert!(v > 0.0 && v < 2.0, "V should charge toward Vs=2, got {v}");
+        // Repeated application with no load current settles at Vs
+        // (RC: tau = Rs * eps0 * A/dz = 443 steps at this dt).
+        let mut v = v;
+        for _ in 0..20000 {
+            v = rsrc.apply_norton(&mut g, &feed, 2.0, dt, cb_src);
+        }
+        assert!((v - 2.0).abs() < 1e-3, "V should settle at Vs, got {v}");
     }
 
     #[test]

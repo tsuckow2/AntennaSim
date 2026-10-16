@@ -21,6 +21,12 @@ pub struct Fdtd {
     pub rsource: ResistiveSource,
     pub probe: DftProbe,
     pub thin_wire: Option<ThinWire>,
+    /// Number of Ez cells in the lumped-port column (no-wire path).
+    /// 1 = single gap cell at the feed point (probe-pin models put PEC
+    /// cells above it). >1 distributes the Norton port over the column
+    /// src_k .. src_k+span — the openEMS-style lumped port, where the
+    /// port voltage is the line integral over the whole column.
+    pub port_span: usize,
     t: f32,
     step: usize,
 }
@@ -37,6 +43,13 @@ impl Fdtd {
         probe: DftProbe,
         thin_wire: Option<ThinWire>,
     ) -> Self {
+        // The wire's base node carries the Thévenin source (see
+        // ThinWire::update_current): wire its resistance in here so
+        // callers can't forget.
+        let mut thin_wire = thin_wire;
+        if let Some(tw) = thin_wire.as_mut() {
+            tw.feed_rs = Some(rsource.rs);
+        }
         Self {
             grid,
             mat,
@@ -47,6 +60,7 @@ impl Fdtd {
             rsource,
             probe,
             thin_wire,
+            port_span: 1,
             t: 0.0,
             step: 0,
         }
@@ -64,20 +78,26 @@ impl Fdtd {
     /// 4. E^{n+1} -= dt*I^{n+1/2}/(eps*dx*dy) (wire.deposit_current)
     /// 5. q^{n+1} from I^{n+1/2} (done in wire.update_current)
     ///
-    /// Luebbers source sequencing otherwise: enforce PEC, then overwrite the
-    /// source cell with E_z = −V_s/dz + I_s·Rs/dz. Record the ACTUAL gap
-    /// voltage V = −E_z·dz (never the prescribed V_s) with I_s.
+    /// Source sequencing: with a thin wire, the Thévenin source lives
+    /// on the wire's base node (set before `update_current`); the gap
+    /// cell's field is never overwritten, so the deposit stands. The
+    /// probe records the wire's terminal pair (V_base, I_bottom).
+    /// Without a wire, the lumped port uses the Norton form below.
     pub fn step(&mut self) {
         let dt = self.dt;
         update_h(&mut self.grid, dt);
         self.cpml.correct_h(&mut self.grid, dt);
 
+        // Source voltage at the E-step time level (used by both paths).
+        let vs_next = self.source.value(self.t + dt);
+
         // Thin-wire: advance current from E^n (does not modify grid yet).
-        let i_wire = if let Some(ref mut tw) = self.thin_wire {
+        let (i_wire, v_wire) = if let Some(ref mut tw) = self.thin_wire {
+            tw.feed_vs = vs_next;
             tw.update_current(&self.grid, dt)
         } else {
             // No wire: fall back to the H-field Ampère loop.
-            self.feed.measure_i_tight(&self.grid)
+            (self.feed.measure_i_tight(&self.grid), 0.0)
         };
 
         update_e(&mut self.grid, &self.mat);
@@ -86,16 +106,55 @@ impl Fdtd {
 
         // Thin-wire: deposit I^{n+1/2} into E^{n+1} as a current source.
         if let Some(ref tw) = self.thin_wire {
-            tw.deposit_current(&mut self.grid, dt);
+            tw.deposit_current(&mut self.grid, &self.mat);
         }
 
         apply_pec(&mut self.grid, &self.mat);
 
-        // Resistive source at the gap cell (E-step time).
+        // Source bookkeeping at the E-step time level.
         self.t += dt;
-        let vs = self.source.value(self.t);
-        let (v_term, i_term) = self.rsource.apply(&mut self.grid, &self.feed, vs, i_wire);
-        self.probe.push(v_term, i_term);
+        let vs = vs_next;
+        if self.thin_wire.is_some() {
+            // Wire path: the source was applied on the wire's base
+            // node inside update_current; record its terminal pair.
+            self.probe.push(v_wire, i_wire);
+        } else {
+            // Lumped port: Norton impressed-current form. (The
+            // Luebbers imposed-field/overwrite form is unstable on
+            // thin gap cells — the Ampère-loop current contains the
+            // cell's own displacement current, whose feedback through
+            // Rs has gain ω·C·Rs ≫ 1 at grid frequencies; an
+            // imposed-field variant with the displacement current
+            // de-embedded also blew up in the efs fixture v8 test,
+            // so the overwrite family is closed. See source.rs.)
+            // The port may span several Ez cells in the column (openEMS-
+            // style): the port voltage is the line integral over the
+            // span, and the same impressed current density is deposited
+            // in each cell (series cells share the port current).
+            let (si, sj, sk) = (self.feed.src_i, self.feed.src_j, self.feed.src_k);
+            let dz = self.grid.dz;
+            let span = self.port_span.max(1);
+            let v_port = -(0..span)
+                .map(|m| self.grid.ez[self.grid.ez_idx(si, sj, sk + m)] * dz)
+                .sum::<f32>();
+            let i_src = (vs - v_port) / self.rsource.rs;
+            let mut v_term = 0.0f32;
+            for m in 0..span {
+                let idx = self.grid.ez_idx(si, sj, sk + m);
+                let cb_src = self.mat.cb_z[idx];
+                let eps = dt / cb_src;
+                self.grid.ez[idx] -= dt * i_src / (eps * self.grid.dx * self.grid.dy);
+                v_term -= self.grid.ez[idx] * dz;
+            }
+            // Record the DELIVERED current i_src, not the Ampère loop:
+            // the loop around a cell containing the impressed source
+            // measures i_src + the cell's displacement current, whose
+            // deposit-driven part anti-correlates with i_src (measured
+            // corr = -0.999, ratio -0.77, and int(V*I_loop)dt < 0 —
+            // nonphysical for a passive load), while (v_term, i_src)
+            // gives int(V*I)dt > 0 and a physical Zin sign structure.
+            self.probe.push(v_term, i_src);
+        }
 
         self.step += 1;
     }

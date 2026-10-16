@@ -1,0 +1,16 @@
+[Unit]
+Description=WebGPU test bench relay (browser agent job queue)
+After=network.target
+
+[Service]
+Type=simple
+User=hatch
+WorkingDirectory=/opt/webgpu-relay
+Environment=WEBGPU_RELAY_PORT=8177
+Environment=WEBGPU_RELAY_TOKEN_FILE=/opt/webgpu-relay/token
+ExecStart=/usr/bin/python3 /opt/webgpu-relay/relay.py
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

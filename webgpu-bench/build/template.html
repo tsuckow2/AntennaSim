@@ -1,0 +1,907 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WebGPU FDTD Test Bench</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+         background: #0d1117; color: #e6edf3; line-height: 1.45; }
+  main { max-width: 880px; margin: 0 auto; padding: 20px 16px 48px; }
+  h1 { font-size: 22px; margin: 4px 0 2px; }
+  h2 { font-size: 16px; margin: 0 0 10px; }
+  .sub { color: #9da7b1; font-size: 13px; margin-bottom: 18px; }
+  section { background: #161b22; border: 1px solid #2d333b; border-radius: 10px;
+            padding: 16px; margin-bottom: 16px; }
+  .row { display: flex; flex-wrap: wrap; gap: 10px; align-items: end; }
+  .field { display: flex; flex-direction: column; gap: 4px; }
+  label { font-size: 12px; color: #9da7b1; }
+  select, input { background: #0d1117; color: #e6edf3; border: 1px solid #2d333b;
+                  border-radius: 6px; padding: 7px 8px; font-size: 14px; }
+  input[type=number] { width: 96px; }
+  input[type=text] { width: 220px; }
+  button { background: #1f6feb; color: #fff; border: 0; border-radius: 6px;
+           padding: 8px 16px; font-size: 14px; cursor: pointer; }
+  button.secondary { background: #21262d; border: 1px solid #2d333b; color: #e6edf3; }
+  button.danger { background: #7d1d1d; }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; }
+  td, th { text-align: left; padding: 4px 8px 4px 0; vertical-align: top; }
+  td.k { color: #9da7b1; white-space: nowrap; width: 210px; }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12.5px;
+          word-break: break-all; }
+  .pill { display: inline-block; padding: 1px 9px; border-radius: 999px; font-size: 12px; }
+  .ok { background: #123d22; color: #3fb950; }
+  .bad { background: #4c1414; color: #f85149; }
+  .warn { background: #463407; color: #d29922; }
+  .idle { background: #21262d; color: #9da7b1; }
+  #log { background: #0d1117; border: 1px solid #2d333b; border-radius: 8px; padding: 10px;
+         height: 190px; overflow-y: auto; white-space: pre-wrap; }
+  progress { width: 100%; height: 14px; }
+  details { margin-top: 8px; }
+  summary { cursor: pointer; color: #9da7b1; font-size: 13px; }
+  .hidden { display: none; }
+</style>
+</head>
+<body>
+<main>
+  <h1>WebGPU FDTD Test Bench</h1>
+  <div class="sub">Runs the AntennaSim FDTD Yee-update kernels (the same WGSL and math as the
+  native <span class="mono">gpu-spike</span> test) in your browser. Open this page on a machine,
+  and either run the jobs manually or leave it connected — Muse can then start jobs on this
+  page remotely, at any time, and gets the results back automatically.</div>
+
+  <section>
+    <h2>GPU adapter <span id="adapterStatus" class="pill idle">not checked</span></h2>
+    <div class="row">
+      <div class="field">
+        <label for="powerPref">Power preference (applies on refresh)</label>
+        <select id="powerPref">
+          <option value="high-performance" selected>high-performance (discrete GPU)</option>
+          <option value="low-power">low-power (integrated GPU)</option>
+          <option value="">browser default</option>
+        </select>
+      </div>
+      <button id="refreshBtn">↻ Refresh adapter</button>
+    </div>
+    <div id="adapterInfo" style="margin-top:12px"></div>
+  </section>
+
+  <section>
+    <h2>Remote control <span id="agentStatus" class="pill idle">disconnected</span></h2>
+    <div class="sub" style="margin-bottom:10px">While connected, this page polls the relay for
+    jobs from Muse and runs them automatically — the built-in parity and benchmark jobs, plus
+    custom WGSL kernels Muse pushes. Results stream back without you doing anything.
+    Keep the tab open and the machine awake (the page holds a screen wake lock while connected).</div>
+    <div class="row">
+      <div class="field">
+        <label for="agentLabel">Machine label (shown to Muse)</label>
+        <input type="text" id="agentLabel" placeholder="e.g. gaming-pc, laptop-rtx">
+      </div>
+      <button id="connectBtn">Connect</button>
+      <button id="disconnectBtn" class="secondary" disabled>Disconnect</button>
+    </div>
+    <div style="margin-top:10px" class="mono">Session: <span id="agentSession">—</span></div>
+  </section>
+
+  <section>
+    <h2>Job 1 — Parity check (correctness)</h2>
+    <div class="sub">Runs the kernels on a small grid on the GPU and the identical math on the
+    CPU, then compares all 6 fields. Native reference: max abs diff ≈ 3e-8.</div>
+    <div class="row">
+      <div class="field">
+        <label for="checkGrid">Grid</label>
+        <select id="checkGrid">
+          <option value="16">16 × 16 × 16</option>
+          <option value="24" selected>24 × 24 × 24</option>
+          <option value="32">32 × 32 × 32</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="checkSteps">Steps</label>
+        <input type="number" id="checkSteps" value="10" min="1" max="200">
+      </div>
+      <button id="checkBtn" disabled>Run parity check</button>
+      <span id="checkResult"></span>
+    </div>
+  </section>
+
+  <section>
+    <h2>Job 2 — Throughput benchmark</h2>
+    <div class="sub">Full Yee E/H step loop, timed on the GPU (wall clock around queue
+    completion, warmup excluded — same method as the native spike, which measured
+    269 Mcell/s on an Intel HD 520).</div>
+    <div class="row">
+      <div class="field">
+        <label for="benchGrid">Grid</label>
+        <select id="benchGrid">
+          <option value="128,128,48">Medium — 128 × 128 × 48</option>
+          <option value="232,232,61" selected>Snyder — 232 × 232 × 61</option>
+          <option value="256,256,96">Large — 256 × 256 × 96</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="benchSteps">Steps</label>
+        <input type="number" id="benchSteps" value="200" min="10" max="20000">
+      </div>
+      <div class="field">
+        <label for="benchRepeats">Repeats</label>
+        <input type="number" id="benchRepeats" value="1" min="1" max="9">
+      </div>
+      <button id="benchBtn" disabled>Run benchmark</button>
+      <button id="stopBtn" class="danger hidden">Stop</button>
+    </div>
+    <div style="margin-top:12px"><progress id="benchProgress" value="0" max="100" class="hidden"></progress></div>
+    <div id="benchResult" style="margin-top:10px"></div>
+  </section>
+
+  <section>
+    <h2>Results</h2>
+    <div class="row">
+      <button id="copyBtn" class="secondary">Copy results JSON</button>
+      <button id="downloadBtn" class="secondary">Download results .json</button>
+      <span id="copyNote" class="sub" style="margin:0"></span>
+    </div>
+  </section>
+
+  <section>
+    <h2>Log</h2>
+    <div id="log" class="mono"></div>
+    <div style="margin-top:10px"><button id="clearLogBtn" class="secondary">Clear log</button></div>
+  </section>
+</main>
+
+<script>
+'use strict';
+// ---------------------------------------------------------------------------
+// FDTD Yee kernels — WGSL copied verbatim from the native gpu-spike test
+// (wgpu 24, validated against the CPU solver: max abs diff 2.98e-8).
+// ---------------------------------------------------------------------------
+const SHADER_H = /* wgsl */`
+struct Params {
+    nx: u32, ny: u32, nz: u32, _pad: u32,
+    ch: f32, ca: f32, cb: f32, _pad2: f32,
+    idx: f32, idy: f32, idz: f32, _pad3: f32,
+};
+@group(0) @binding(0) var<uniform> p: Params;
+@group(0) @binding(1) var<storage, read> ex: array<f32>;
+@group(0) @binding(2) var<storage, read> ey: array<f32>;
+@group(0) @binding(3) var<storage, read> ez: array<f32>;
+@group(0) @binding(4) var<storage, read_write> hx: array<f32>;
+@group(0) @binding(5) var<storage, read_write> hy: array<f32>;
+@group(0) @binding(6) var<storage, read_write> hz: array<f32>;
+
+fn id3(i: u32, j: u32, k: u32) -> u32 { return (i * p.ny + j) * p.nz + k; }
+
+@compute @workgroup_size(256)
+fn update_h(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let n = gid.x;
+    let total = p.nx * p.ny * p.nz;
+    if (n >= total) { return; }
+    let k = n % p.nz;
+    let j = (n / p.nz) % p.ny;
+    let i = n / (p.ny * p.nz);
+    if (i + 1u >= p.nx || j + 1u >= p.ny || k + 1u >= p.nz) { return; }
+    let c = id3(i, j, k);
+    let jp = c + p.nz;
+    let kp = c + 1u;
+    hx[c] -= p.ch * ((ez[jp] - ez[c]) * p.idy - (ey[kp] - ey[c]) * p.idz);
+    hy[c] -= p.ch * ((ex[kp] - ex[c]) * p.idz - (ez[c + p.ny * p.nz] - ez[c]) * p.idx);
+    hz[c] -= p.ch * ((ey[c + p.ny * p.nz] - ey[c]) * p.idx - (ex[jp] - ex[c]) * p.idy);
+}
+`;
+const SHADER_E = /* wgsl */`
+struct Params {
+    nx: u32, ny: u32, nz: u32, _pad: u32,
+    ch: f32, ca: f32, cb: f32, _pad2: f32,
+    idx: f32, idy: f32, idz: f32, _pad3: f32,
+};
+@group(0) @binding(0) var<uniform> p: Params;
+@group(0) @binding(1) var<storage, read_write> ex: array<f32>;
+@group(0) @binding(2) var<storage, read_write> ey: array<f32>;
+@group(0) @binding(3) var<storage, read_write> ez: array<f32>;
+@group(0) @binding(4) var<storage, read> hx: array<f32>;
+@group(0) @binding(5) var<storage, read> hy: array<f32>;
+@group(0) @binding(6) var<storage, read> hz: array<f32>;
+
+fn id3(i: u32, j: u32, k: u32) -> u32 { return (i * p.ny + j) * p.nz + k; }
+
+@compute @workgroup_size(256)
+fn update_e(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let n = gid.x;
+    let total = p.nx * p.ny * p.nz;
+    if (n >= total) { return; }
+    let k = n % p.nz;
+    let j = (n / p.nz) % p.ny;
+    let i = n / (p.ny * p.nz);
+    if (j == 0u || k == 0u || i == 0u) { return; }
+    let c = id3(i, j, k);
+    let jm = c - p.nz;
+    let km = c - 1u;
+    let im = c - p.ny * p.nz;
+    ex[c] = p.ca * ex[c] + p.cb * ((hz[c] - hz[jm]) * p.idy - (hy[c] - hy[km]) * p.idz);
+    ey[c] = p.ca * ey[c] + p.cb * ((hx[c] - hx[km]) * p.idz - (hz[c] - hz[im]) * p.idx);
+    ez[c] = p.ca * ez[c] + p.cb * ((hy[c] - hy[im]) * p.idx - (hx[c] - hx[jm]) * p.idy);
+}
+`;
+
+// Physical constants / grid spacings — identical to gpu-spike make_params().
+function makeParams(nx, ny, nz) {
+  const dx = 5.0e-4, dy = 5.0e-4, dz = 5.25e-4;
+  const c0 = 299792458.0;
+  const dt = 0.5 / (c0 * Math.sqrt(1 / (dx * dx) + 1 / (dy * dy) + 1 / (dz * dz)));
+  const mu0 = 1.25663706212e-6, eps0 = 8.854187817e-12;
+  return { nx, ny, nz, ch: dt / mu0, ca: 1.0, cb: dt / eps0,
+           idx: 1 / dx, idy: 1 / dy, idz: 1 / dz };
+}
+
+function paramsBuffer(p) {
+  const buf = new ArrayBuffer(48);
+  const v = new DataView(buf);
+  v.setUint32(0, p.nx, true); v.setUint32(4, p.ny, true); v.setUint32(8, p.nz, true);
+  v.setFloat32(16, p.ch, true); v.setFloat32(20, p.ca, true); v.setFloat32(24, p.cb, true);
+  v.setFloat32(32, p.idx, true); v.setFloat32(36, p.idy, true); v.setFloat32(40, p.idz, true);
+  return buf;
+}
+
+// Gaussian bump in Ez at the grid centre — identical to gpu-spike bump_init().
+function bumpInit(nx, ny, nz) {
+  const n = nx * ny * nz;
+  const fields = [];
+  for (let f = 0; f < 6; f++) fields.push(new Float32Array(n));
+  const ez = fields[2];
+  const ci = Math.floor(nx / 2), cj = Math.floor(ny / 2), ck = Math.floor(nz / 2);
+  for (let di = -2; di <= 2; di++) for (let dj = -2; dj <= 2; dj++) for (let dk = -2; dk <= 2; dk++) {
+    const r2 = di * di + dj * dj + dk * dk;
+    ez[((ci + di) * ny + (cj + dj)) * nz + (ck + dk)] = Math.exp(-r2 / 3.0);
+  }
+  return fields;
+}
+
+// CPU mirror of the two kernels (JS numbers are f64; the native mirror is f32,
+// so expect browser parity diffs in the 1e-7..1e-6 range rather than 3e-8).
+function cpuStep(f, nx, ny, nz, p) {
+  const [ex, ey, ez, hx, hy, hz] = f;
+  const id = (i, j, k) => (i * ny + j) * nz + k;
+  for (let i = 0; i < nx; i++) for (let j = 0; j < ny; j++) for (let k = 0; k < nz; k++) {
+    if (i + 1 >= nx || j + 1 >= ny || k + 1 >= nz) continue;
+    const c = id(i, j, k), jp = c + nz, kp = c + 1, ip = c + ny * nz;
+    hx[c] -= p.ch * ((ez[jp] - ez[c]) * p.idy - (ey[kp] - ey[c]) * p.idz);
+    hy[c] -= p.ch * ((ex[kp] - ex[c]) * p.idz - (ez[ip] - ez[c]) * p.idx);
+    hz[c] -= p.ch * ((ey[ip] - ey[c]) * p.idx - (ex[jp] - ex[c]) * p.idy);
+  }
+  for (let i = 0; i < nx; i++) for (let j = 0; j < ny; j++) for (let k = 0; k < nz; k++) {
+    if (j === 0 || k === 0 || i === 0) continue;
+    const c = id(i, j, k), jm = c - nz, km = c - 1, im = c - ny * nz;
+    ex[c] = p.ca * ex[c] + p.cb * ((hz[c] - hz[jm]) * p.idy - (hy[c] - hy[km]) * p.idz);
+    ey[c] = p.ca * ey[c] + p.cb * ((hx[c] - hx[km]) * p.idz - (hz[c] - hz[im]) * p.idx);
+    ez[c] = p.ca * ez[c] + p.cb * ((hy[c] - hy[im]) * p.idx - (hx[c] - hx[jm]) * p.idy);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Page state
+// ---------------------------------------------------------------------------
+const $ = id => document.getElementById(id);
+const PAGE_VERSION = 'v4';
+const results = { page: 'webgpu-fdtd-test-bench', version: 2, pageVersion: PAGE_VERSION, runs: [] };
+let adapter = null, device = null, adapterSnapshot = null;
+let stopRequested = false;
+let jobRunning = false;
+let eventSink = null; // when set (remote job), log lines stream to the relay
+
+function log(msg) {
+  const el = $('log');
+  const t = new Date().toLocaleTimeString();
+  el.textContent += `[${t}] ${msg}\n`;
+  el.scrollTop = el.scrollHeight;
+  if (eventSink) { try { eventSink(msg); } catch (e) { /* relay hiccup: keep going */ } }
+}
+function fmt(n) { return n.toLocaleString('en-US'); }
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+function setAdapterStatus(kind, text) {
+  const el = $('adapterStatus');
+  el.className = 'pill ' + kind;
+  el.textContent = text;
+}
+
+async function refreshAdapter() {
+  setAdapterStatus('idle', 'checking…');
+  $('checkBtn').disabled = true;
+  $('benchBtn').disabled = true;
+  if (!navigator.gpu) {
+    setAdapterStatus('bad', 'WebGPU not available');
+    $('adapterInfo').innerHTML =
+      '<p>This browser did not expose WebGPU (<span class="mono">navigator.gpu</span> is missing). ' +
+      'Use a current Chrome or Edge on desktop/Android, or Safari 26+. The page must be served ' +
+      'over HTTPS (it is) and WebGPU must not be disabled in browser flags.</p>';
+    log('navigator.gpu missing — WebGPU unavailable in this browser/context.');
+    return;
+  }
+  const pref = $('powerPref').value;
+  const opts = {};
+  if (pref) opts.powerPreference = pref;
+  try {
+    adapter = await navigator.gpu.requestAdapter(opts);
+  } catch (e) {
+    adapter = null;
+    log('requestAdapter threw: ' + e.message);
+  }
+  if (!adapter) {
+    setAdapterStatus('bad', 'no adapter');
+    $('adapterInfo').innerHTML = '<p><span class="mono">requestAdapter()</span> returned null — ' +
+      'no WebGPU-capable GPU was offered. Try the other power preference, or a different browser.</p>';
+    log('requestAdapter returned null (powerPreference=' + (pref || 'default') + ').');
+    return;
+  }
+  const info = adapter.info || {};
+  const limits = adapter.limits;
+  adapterSnapshot = {
+    vendor: info.vendor || '', architecture: info.architecture || '',
+    device: info.device || '', description: info.description || '',
+    isFallbackAdapter: !!info.isFallbackAdapter,
+    powerPreference: pref || 'default',
+    features: [...adapter.features],
+    limits: {
+      maxBufferSize: limits.maxBufferSize,
+      maxStorageBufferBindingSize: limits.maxStorageBufferBindingSize,
+      maxComputeWorkgroupsPerDimension: limits.maxComputeWorkgroupsPerDimension,
+      maxComputeInvocationsPerWorkgroup: limits.maxComputeInvocationsPerWorkgroup,
+      maxStorageBuffersPerShaderStage: limits.maxStorageBuffersPerShaderStage,
+    },
+    userAgent: navigator.userAgent,
+    when: new Date().toISOString(),
+  };
+  device = await adapter.requestDevice();
+  device.lost.then(d => {
+    log('DEVICE LOST: ' + d.message + ' (reason: ' + d.reason + '). Refresh the adapter to recover.');
+    setAdapterStatus('bad', 'device lost');
+    $('checkBtn').disabled = true;
+    $('benchBtn').disabled = true;
+  });
+  device.addEventListener('uncapturederror', ev => log('GPU error: ' + ev.error.message));
+
+  const label = info.description || info.device || info.architecture || 'GPU';
+  setAdapterStatus(info.isFallbackAdapter ? 'warn' : 'ok',
+                   info.isFallbackAdapter ? 'software fallback adapter' : 'ready');
+  $('adapterInfo').innerHTML =
+    '<table>' +
+    '<tr><td class="k">Adapter</td><td class="mono">' + escapeHtml(label) + '</td></tr>' +
+    '<tr><td class="k">Vendor / architecture</td><td class="mono">' +
+      escapeHtml(info.vendor || '?') + ' / ' + escapeHtml(info.architecture || '?') + '</td></tr>' +
+    '<tr><td class="k">Fallback (software)</td><td>' + (info.isFallbackAdapter ? 'yes — results will be slow' : 'no') + '</td></tr>' +
+    '<tr><td class="k">Power preference</td><td>' + (pref || 'default') + '</td></tr>' +
+    '<tr><td class="k">Max buffer size</td><td class="mono">' + fmt(limits.maxBufferSize) + ' bytes</td></tr>' +
+    '<tr><td class="k">Max storage binding</td><td class="mono">' + fmt(limits.maxStorageBufferBindingSize) + ' bytes</td></tr>' +
+    '<tr><td class="k">Max workgroups / dim</td><td class="mono">' + fmt(limits.maxComputeWorkgroupsPerDimension) + '</td></tr>' +
+    '</table>' +
+    '<details><summary>Features (' + adapterSnapshot.features.length + ')</summary>' +
+    '<div class="mono">' + adapterSnapshot.features.join(', ') + '</div></details>';
+  log('Adapter ready: ' + label + ' (vendor=' + (info.vendor || '?') +
+      ', fallback=' + !!info.isFallbackAdapter + ').');
+  $('checkBtn').disabled = false;
+  $('benchBtn').disabled = false;
+}
+
+// ---------------------------------------------------------------------------
+// GPU runner: builds buffers/pipelines for one FDTD grid, runs steps chunked.
+// ---------------------------------------------------------------------------
+async function runGpu(nx, ny, nz) {
+  const params = makeParams(nx, ny, nz);
+  const cells = nx * ny * nz;
+  const bytes = cells * 4;
+  if (bytes > adapter.limits.maxStorageBufferBindingSize)
+    throw new Error('field buffer ' + fmt(bytes) + ' B exceeds maxStorageBufferBindingSize ' +
+                    fmt(adapter.limits.maxStorageBufferBindingSize) + ' B');
+  const init = bumpInit(nx, ny, nz);
+  const usage = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC;
+  const bufs = init.map((data, i) => {
+    const b = device.createBuffer({ label: 'field' + i, size: bytes, usage });
+    device.queue.writeBuffer(b, 0, data);
+    return b;
+  });
+  const paramsBuf = device.createBuffer({
+    label: 'params', size: 48, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+  device.queue.writeBuffer(paramsBuf, 0, paramsBuffer(params));
+  const staging = device.createBuffer({
+    label: 'staging', size: bytes, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+
+  const modH = device.createShaderModule({ code: SHADER_H });
+  const modE = device.createShaderModule({ code: SHADER_E });
+  const pipeH = device.createComputePipeline({
+    layout: 'auto', compute: { module: modH, entryPoint: 'update_h' } });
+  const pipeE = device.createComputePipeline({
+    layout: 'auto', compute: { module: modE, entryPoint: 'update_e' } });
+  const mkBg = pipe => device.createBindGroup({
+    layout: pipe.getBindGroupLayout(0),
+    entries: [{ binding: 0, resource: { buffer: paramsBuf } },
+              ...bufs.map((b, i) => ({ binding: i + 1, resource: { buffer: b } }))],
+  });
+  const bgH = mkBg(pipeH), bgE = mkBg(pipeE);
+  const wg = Math.ceil(cells / 256);
+
+  async function runSteps(total, chunk, onProgress) {
+    let done = 0;
+    while (done < total) {
+      if (stopRequested) break;
+      const n = Math.min(chunk, total - done);
+      const enc = device.createCommandEncoder();
+      const pass = enc.beginComputePass();
+      for (let s = 0; s < n; s++) {
+        pass.setPipeline(pipeH); pass.setBindGroup(0, bgH); pass.dispatchWorkgroups(wg);
+        pass.setPipeline(pipeE); pass.setBindGroup(0, bgE); pass.dispatchWorkgroups(wg);
+      }
+      pass.end();
+      device.queue.submit([enc.finish()]);
+      done += n;
+      if (onProgress) onProgress(done, total);
+      await device.queue.onSubmittedWorkDone();
+    }
+    return done;
+  }
+
+  async function readField(which) {
+    const enc = device.createCommandEncoder();
+    enc.copyBufferToBuffer(bufs[which], 0, staging, 0, bytes);
+    device.queue.submit([enc.finish()]);
+    await staging.mapAsync(GPUMapMode.READ);
+    const out = new Float32Array(staging.getMappedRange().slice(0));
+    staging.unmap();
+    return out;
+  }
+
+  function destroy() {
+    bufs.forEach(b => b.destroy());
+    paramsBuf.destroy(); staging.destroy();
+  }
+  return { runSteps, readField, destroy, cells };
+}
+
+// ---------------------------------------------------------------------------
+// Job cores — shared by the manual buttons and the remote agent.
+// ---------------------------------------------------------------------------
+async function coreParity(n, steps) {
+  log(`Parity check: grid ${n}^3, ${steps} steps…`);
+  const gpu = await runGpu(n, n, n);
+  await gpu.runSteps(steps, steps);
+  const params = makeParams(n, n, n);
+  const cpu = bumpInit(n, n, n);
+  for (let s = 0; s < steps; s++) cpuStep(cpu, n, n, n, params);
+  let worst = 0;
+  for (let f = 0; f < 6; f++) {
+    const got = await gpu.readField(f);
+    for (let i = 0; i < got.length; i++) {
+      const d = Math.abs(got[i] - cpu[f][i]);
+      if (d > worst) worst = d;
+    }
+  }
+  gpu.destroy();
+  const pass = worst < 1e-5;
+  log(`Parity check done: max abs diff ${worst.toExponential(3)} over 6 fields × ${steps} steps → ` +
+      (pass ? 'PASS' : 'FAIL'));
+  const rec = { job: 'parity-check', grid: [n, n, n], steps, maxAbsDiff: worst, pass,
+                adapter: adapterSnapshot, when: new Date().toISOString() };
+  results.runs.push(rec);
+  return rec;
+}
+
+async function coreBench(nx, ny, nz, steps, repeats, onProgress) {
+  const rates = [];
+  const runs = [];
+  for (let r = 0; r < repeats; r++) {
+    log(`Benchmark run ${r + 1}/${repeats}: grid ${nx}×${ny}×${nz}, ${steps} steps (+10 warmup)…`);
+    const gpu = await runGpu(nx, ny, nz);
+    await gpu.runSteps(10, 10); // warmup, untimed
+    const t0 = performance.now();
+    const doneSteps = await gpu.runSteps(steps, 25, onProgress);
+    await device.queue.onSubmittedWorkDone();
+    const el = (performance.now() - t0) / 1000;
+    const ez = await gpu.readField(2);
+    let checksum = 0;
+    for (let i = 0; i < ez.length; i++) checksum += Math.abs(ez[i]);
+    gpu.destroy();
+    if (doneSteps < steps) { log('Benchmark stopped after ' + doneSteps + ' steps.'); break; }
+    const rate = gpu.cells * doneSteps / el / 1e6;
+    rates.push(rate);
+    log(`Run ${r + 1}: ${el.toFixed(3)} s → ${rate.toFixed(1)} Mcell/s (Ez |sum| checksum ${checksum.toExponential(6)})`);
+    const rec = { job: 'benchmark', grid: [nx, ny, nz], steps: doneSteps, seconds: el,
+                  mcellPerSec: rate, ezAbsSum: checksum,
+                  timing: 'wall clock around queue completion, 10-step warmup excluded',
+                  adapter: adapterSnapshot, when: new Date().toISOString() };
+    results.runs.push(rec);
+    runs.push(rec);
+  }
+  let median = null;
+  if (rates.length) {
+    const sorted = [...rates].sort((a, b) => a - b);
+    median = sorted[Math.floor(sorted.length / 2)];
+  }
+  return { job: 'benchmark', grid: [nx, ny, nz], steps, repeats, rates, medianMcellPerSec: median, runs };
+}
+
+// Custom WGSL job contract (remote jobs pushed by Muse):
+//   entry point `main`, @workgroup_size(256), guard `if (n >= total) { return; }`
+//   @binding(0) uniform { nx: u32, ny: u32, nz: u32, step: u32 }
+//   @binding(1..6) var<storage, read_write> fields ex, ey, ez, hx, hy, hz
+// Fields start from the standard bump init. `step` is incremented per dispatch.
+async function coreCustom(job) {
+  const [nx, ny, nz] = job.grid;
+  const steps = job.steps || 10;
+  const cells = nx * ny * nz;
+  const bytes = cells * 4;
+  if (bytes > adapter.limits.maxStorageBufferBindingSize)
+    throw new Error('field buffer ' + fmt(bytes) + ' B exceeds maxStorageBufferBindingSize');
+  const mod = device.createShaderModule({ code: job.wgsl });
+  const info = await mod.getCompilationInfo();
+  const errs = info.messages.filter(m => m.type === 'error');
+  info.messages.filter(m => m.type === 'warning')
+    .forEach(m => log('WGSL warning (line ' + m.lineNum + '): ' + m.message));
+  if (errs.length)
+    throw new Error('WGSL compile error: ' +
+      errs.map(m => 'line ' + m.lineNum + ': ' + m.message).join('; '));
+  const init = bumpInit(nx, ny, nz);
+  const usage = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC;
+  const bufs = init.map((data, i) => {
+    const b = device.createBuffer({ label: 'cfield' + i, size: bytes, usage });
+    device.queue.writeBuffer(b, 0, data);
+    return b;
+  });
+  const uni = device.createBuffer({
+    label: 'cuniform', size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+  const uniBase = new Uint32Array([nx, ny, nz, 0]);
+  device.queue.writeBuffer(uni, 0, uniBase);
+  const staging = device.createBuffer({
+    label: 'cstaging', size: bytes, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+  const pipe = device.createComputePipeline({
+    layout: 'auto', compute: { module: mod, entryPoint: 'main' } });
+  const bg = device.createBindGroup({
+    layout: pipe.getBindGroupLayout(0),
+    entries: [{ binding: 0, resource: { buffer: uni } },
+              ...bufs.map((b, i) => ({ binding: i + 1, resource: { buffer: b } }))],
+  });
+  const wg = Math.ceil(cells / 256);
+  log(`Custom job '${job.name || 'custom'}': grid ${nx}×${ny}×${nz}, ${steps} steps…`);
+  const t0 = performance.now();
+  for (let s = 0; s < steps; s++) {
+    if (stopRequested) { log('Custom job stopped at step ' + s + '.'); break; }
+    device.queue.writeBuffer(uni, 12, new Uint32Array([s]));
+    const enc = device.createCommandEncoder();
+    const pass = enc.beginComputePass();
+    pass.setPipeline(pipe); pass.setBindGroup(0, bg); pass.dispatchWorkgroups(wg);
+    pass.end();
+    device.queue.submit([enc.finish()]);
+    if ((s + 1) % 25 === 0 || s + 1 === steps) {
+      await device.queue.onSubmittedWorkDone();
+      log(`Custom job: step ${s + 1}/${steps}`);
+    }
+  }
+  await device.queue.onSubmittedWorkDone();
+  const el = (performance.now() - t0) / 1000;
+  let fieldAbsSums = null;
+  if (job.readback !== false) {
+    fieldAbsSums = [];
+    for (let f = 0; f < 6; f++) {
+      const enc = device.createCommandEncoder();
+      enc.copyBufferToBuffer(bufs[f], 0, staging, 0, bytes);
+      device.queue.submit([enc.finish()]);
+      await staging.mapAsync(GPUMapMode.READ);
+      const data = new Float32Array(staging.getMappedRange());
+      let sum = 0;
+      for (let i = 0; i < data.length; i++) sum += Math.abs(data[i]);
+      staging.unmap();
+      fieldAbsSums.push(sum);
+    }
+  }
+  bufs.forEach(b => b.destroy()); uni.destroy(); staging.destroy();
+  const rate = cells * steps / el / 1e6;
+  log(`Custom job done: ${el.toFixed(3)} s → ${rate.toFixed(1)} Mcell-steps/s`);
+  const rec = { job: 'custom', name: job.name || 'custom', grid: [nx, ny, nz], steps,
+                seconds: el, mcellPerSec: rate, fieldAbsSums,
+                adapter: adapterSnapshot, when: new Date().toISOString() };
+  results.runs.push(rec);
+  return rec;
+}
+
+// ---------------------------------------------------------------------------
+// Manual job handlers
+// ---------------------------------------------------------------------------
+async function runCheck() {
+  if (jobRunning) return;
+  jobRunning = true;
+  const n = parseInt($('checkGrid').value, 10);
+  const steps = Math.max(1, parseInt($('checkSteps').value, 10) || 10);
+  $('checkBtn').disabled = true;
+  $('checkResult').innerHTML = '';
+  try {
+    const rec = await coreParity(n, steps);
+    $('checkResult').innerHTML = '<span class="pill ' + (rec.pass ? 'ok' : 'bad') + '">' +
+      (rec.pass ? 'PASS' : 'FAIL') + '</span> <span class="mono">max abs diff = ' +
+      rec.maxAbsDiff.toExponential(3) + '</span>';
+  } catch (e) {
+    log('Parity check failed: ' + e.message);
+    $('checkResult').innerHTML = '<span class="pill bad">error</span> ' + escapeHtml(e.message);
+  }
+  jobRunning = false;
+  $('checkBtn').disabled = false;
+}
+
+async function runBench() {
+  if (jobRunning) return;
+  jobRunning = true;
+  stopRequested = false;
+  const [nx, ny, nz] = $('benchGrid').value.split(',').map(Number);
+  const steps = Math.max(10, parseInt($('benchSteps').value, 10) || 200);
+  const repeats = Math.min(9, Math.max(1, parseInt($('benchRepeats').value, 10) || 1));
+  $('benchBtn').disabled = true; $('checkBtn').disabled = true;
+  $('stopBtn').classList.remove('hidden');
+  const prog = $('benchProgress');
+  prog.classList.remove('hidden'); prog.value = 0;
+  $('benchResult').innerHTML = '';
+  try {
+    const out = await coreBench(nx, ny, nz, steps, repeats, (d, t) => { prog.value = (d / t) * 100; });
+    if (out.rates.length) {
+      $('benchResult').innerHTML = '<span class="pill ok">done</span> ' +
+        '<span class="mono">median ' + out.medianMcellPerSec.toFixed(1) + ' Mcell/s' +
+        (out.rates.length > 1 ? ' (runs: ' + out.rates.map(x => x.toFixed(1)).join(', ') + ')' : '') +
+        '</span>';
+    }
+  } catch (e) {
+    log('Benchmark failed: ' + e.message);
+    $('benchResult').innerHTML = '<span class="pill bad">error</span> ' + escapeHtml(e.message);
+  }
+  prog.classList.add('hidden');
+  $('stopBtn').classList.add('hidden');
+  jobRunning = false;
+  $('benchBtn').disabled = false; $('checkBtn').disabled = false;
+}
+
+// ---------------------------------------------------------------------------
+// Remote agent — long-polls the relay, executes jobs, streams results back.
+// ---------------------------------------------------------------------------
+const agent = { connected: false, sessionId: null, agentKey: null, abortCtrl: null, wakeLock: null };
+
+function setAgentStatus(kind, text) {
+  const el = $('agentStatus');
+  el.className = 'pill ' + kind;
+  el.textContent = text;
+}
+
+async function agentPost(path, obj, signal) {
+  const r = await fetch(path, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(obj),
+    signal: signal,
+  });
+  if (!r.ok) throw new Error(path + ' → HTTP ' + r.status);
+  return r.json();
+}
+
+async function agentRegister() {
+  const label = $('agentLabel').value.trim() ||
+    (adapterSnapshot && (adapterSnapshot.description || adapterSnapshot.architecture)) ||
+    'browser';
+  let saved = null;
+  try { saved = JSON.parse(sessionStorage.getItem('webgpu-session') || 'null'); } catch (e) {}
+  const payload = { label: label, adapter: adapterSnapshot, userAgent: navigator.userAgent,
+                    pageVersion: PAGE_VERSION };
+  if (saved && saved.sessionId && saved.agentKey) {
+    payload.resumeSessionId = saved.sessionId;
+    payload.agentKey = saved.agentKey;
+  }
+  const res = await agentPost('/agent/register', payload);
+  agent.sessionId = res.sessionId;
+  agent.agentKey = res.agentKey;
+  try {
+    sessionStorage.setItem('webgpu-session',
+      JSON.stringify({ sessionId: res.sessionId, agentKey: res.agentKey }));
+  } catch (e) {}
+  $('agentSession').textContent = res.sessionId + ' (' + label + ')';
+  log('Remote control connected. Session ' + res.sessionId + ', label "' + label + '"' +
+      (res.resumed ? ' (resumed — queued jobs kept)' : '') + '.');
+}
+
+function agentEvent(jobId, line) {
+  agentPost('/agent/event', {
+    sessionId: agent.sessionId, agentKey: agent.agentKey, jobId: jobId, line: line,
+  }).catch(() => {});
+}
+
+async function agentPostResult(jobId, status, result) {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      await agentPost('/agent/result', {
+        sessionId: agent.sessionId, agentKey: agent.agentKey,
+        jobId: jobId, status: status, result: result,
+      });
+      return;
+    } catch (e) { await sleep(2000); }
+  }
+  log('Could not deliver result for job ' + jobId + ' after 3 attempts.');
+}
+
+async function executeRemote(job) {
+  log('Remote job received: ' + job.type + ' (id ' + job.id + ')');
+  if (job.type === 'reload') {
+    // Works even without a GPU device. Report first, then reload; after the
+    // reload the page resumes this same session (sessionStorage) so queued
+    // jobs and identity survive.
+    await agentPostResult(job.id, 'done', { reloading: true, pageVersion: PAGE_VERSION });
+    log('Reloading page now…');
+    setTimeout(() => location.reload(), 400);
+    return;
+  }
+  if (!device) {
+    await agentPostResult(job.id, 'error', { error: 'no WebGPU device on this page' });
+    return;
+  }
+  if (jobRunning) {
+    await agentPostResult(job.id, 'error', { error: 'page busy with another job' });
+    return;
+  }
+  jobRunning = true;
+  stopRequested = false;
+  eventSink = line => agentEvent(job.id, line);
+  try {
+    let rec = null;
+    if (job.type === 'parity') {
+      const n = Array.isArray(job.grid) ? job.grid[0] : (job.grid || 24);
+      rec = await coreParity(n, job.steps || 10);
+    } else if (job.type === 'bench') {
+      const g = job.grid || [232, 232, 61];
+      rec = await coreBench(g[0], g[1], g[2], job.steps || 200, job.repeats || 1, null);
+    } else if (job.type === 'custom') {
+      rec = await coreCustom(job);
+    } else {
+      throw new Error('unknown job type: ' + job.type);
+    }
+    await agentPostResult(job.id, 'done', rec);
+    log('Remote job ' + job.id + ' done, result sent.');
+  } catch (e) {
+    log('Remote job ' + job.id + ' failed: ' + e.message);
+    await agentPostResult(job.id, 'error', { error: e.message });
+  }
+  eventSink = null;
+  jobRunning = false;
+  if (pendingUpdate) {
+    log('Reloading for the pending page update…');
+    location.reload();
+  }
+}
+
+async function pollLoop() {
+  while (agent.connected) {
+    try {
+      agent.abortCtrl = new AbortController();
+      const timer = setTimeout(() => agent.abortCtrl.abort(), 45000);
+      const res = await agentPost('/agent/poll',
+        { sessionId: agent.sessionId, agentKey: agent.agentKey }, agent.abortCtrl.signal);
+      clearTimeout(timer);
+      if (res.job) await executeRemote(res.job);
+    } catch (e) {
+      if (!agent.connected) break;
+      if (String(e.message).includes('401')) {
+        // Relay forgot this session (e.g. it restarted): register fresh.
+        log('Relay dropped the session — registering a new one…');
+        try { sessionStorage.removeItem('webgpu-session'); } catch (e2) {}
+        try { await agentRegister(); } catch (e2) { await sleep(5000); }
+      } else {
+        // Transient failure — most often the browser froze/aborted the poll
+        // for a background tab. Keep the SAME session so jobs queued for it
+        // are still delivered when the tab wakes up.
+        await sleep(3000);
+      }
+    }
+  }
+}
+
+async function keepAwake() {
+  try {
+    agent.wakeLock = await navigator.wakeLock.request('screen');
+    agent.wakeLock.addEventListener('release', () => { agent.wakeLock = null; });
+  } catch (e) { /* wake lock is best-effort */ }
+}
+
+async function connectAgent() {
+  if (agent.connected) return;
+  try {
+    await agentRegister();
+  } catch (e) {
+    setAgentStatus('bad', 'relay unreachable');
+    log('Could not reach the relay: ' + e.message);
+    return;
+  }
+  agent.connected = true;
+  setAgentStatus('ok', 'connected');
+  $('connectBtn').disabled = true;
+  $('disconnectBtn').disabled = false;
+  keepAwake();
+  pollLoop();
+}
+
+function disconnectAgent() {
+  agent.connected = false;
+  if (agent.abortCtrl) agent.abortCtrl.abort();
+  if (agent.wakeLock) { agent.wakeLock.release(); agent.wakeLock = null; }
+  try { sessionStorage.removeItem('webgpu-session'); } catch (e) {}
+  agent.sessionId = null;
+  $('agentSession').textContent = '—';
+  setAgentStatus('idle', 'disconnected');
+  $('connectBtn').disabled = false;
+  $('disconnectBtn').disabled = true;
+  log('Remote control disconnected.');
+}
+
+// ---------------------------------------------------------------------------
+// Self-update — poll version.txt; when the deployed version differs from the
+// running PAGE_VERSION, reload (immediately when idle, deferred while a job
+// runs). This lets Muse push new page code to every open tab remotely:
+// deploy a new index.html + version.txt and tabs pick it up within ~60 s.
+// ---------------------------------------------------------------------------
+let pendingUpdate = false;
+async function checkForUpdate() {
+  try {
+    const r = await fetch('version.txt', { cache: 'no-store' });
+    if (!r.ok) return;
+    const v = (await r.text()).trim();
+    if (!v || v === PAGE_VERSION) return;
+    if (jobRunning) {
+      if (!pendingUpdate) log('Page update ' + v + ' available — will reload when the current job finishes.');
+      pendingUpdate = true;
+    } else {
+      log('Page update ' + v + ' available — reloading…');
+      location.reload();
+    }
+  } catch (e) { /* offline or missing version.txt: ignore */ }
+}
+setInterval(checkForUpdate, 60000);
+
+// ---------------------------------------------------------------------------
+// Wiring
+// ---------------------------------------------------------------------------
+$('refreshBtn').addEventListener('click', refreshAdapter);
+$('checkBtn').addEventListener('click', runCheck);
+$('benchBtn').addEventListener('click', runBench);
+$('stopBtn').addEventListener('click', () => { stopRequested = true; log('Stop requested…'); });
+$('clearLogBtn').addEventListener('click', () => { $('log').textContent = ''; });
+$('connectBtn').addEventListener('click', connectAgent);
+$('disconnectBtn').addEventListener('click', disconnectAgent);
+$('agentLabel').value = localStorage.getItem('webgpu-label') || '';
+$('agentLabel').addEventListener('change', () => {
+  localStorage.setItem('webgpu-label', $('agentLabel').value.trim());
+});
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible' && agent.connected && !agent.wakeLock) keepAwake();
+});
+$('copyBtn').addEventListener('click', async () => {
+  results.exportedAt = new Date().toISOString();
+  results.url = location.href;
+  try {
+    await navigator.clipboard.writeText(JSON.stringify(results, null, 2));
+    $('copyNote').textContent = 'Copied — paste it back to Muse.';
+  } catch (e) {
+    $('copyNote').textContent = 'Clipboard blocked; use Download instead.';
+  }
+});
+$('downloadBtn').addEventListener('click', () => {
+  results.exportedAt = new Date().toISOString();
+  results.url = location.href;
+  const blob = new Blob([JSON.stringify(results, null, 2)], { type: 'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'webgpu-fdtd-results.json';
+  a.click();
+  URL.revokeObjectURL(a.href);
+});
+
+log('Page loaded. Detecting adapter…');
+(async () => { await refreshAdapter(); connectAgent(); })();
+</script>
+</body>
+</html>

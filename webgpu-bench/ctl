@@ -1,0 +1,23 @@
+#!/bin/bash
+# ctl — local wrapper: runs webgpu-ctl on Forge via mssh.
+#   ./ctl sessions
+#   ./ctl parity <sessionId> [grid] [steps]
+#   ./ctl bench  <sessionId> [nx,ny,nz] [steps] [repeats]
+#   ./ctl job <jobId>
+#   ./ctl custom <sessionId> <local-shader.wgsl> [nx,ny,nz] [steps]
+#   ./ctl submit <sessionId> <local-job.json>
+set -e
+cmd="${1:-}"
+case "$cmd" in
+  custom)
+    session="$2"; file="$3"; grid="${4:-64,64,64}"; steps="${5:-10}"
+    cat "$file" | ~/workspace/bin/mssh webgpu-ctl custom "$session" - "$grid" "$steps"
+    ;;
+  submit)
+    session="$2"; file="$3"
+    cat "$file" | ~/workspace/bin/mssh webgpu-ctl submit "$session" -
+    ;;
+  *)
+    exec ~/workspace/bin/mssh webgpu-ctl "$@"
+    ;;
+esac

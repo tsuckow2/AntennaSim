@@ -1,0 +1,117 @@
+#!/usr/bin/env python3
+"""webgpu-ctl — control CLI for the WebGPU test bench relay (runs on Forge).
+
+Reads the control token from /opt/webgpu-relay/token and talks to the
+relay on 127.0.0.1:8177. Usage:
+  webgpu-ctl sessions
+  webgpu-ctl job <jobId>
+  webgpu-ctl submit <sessionId> <job.json | -> [--wait SECONDS]
+  webgpu-ctl parity <sessionId> [gridN] [steps] [--wait SECONDS]
+  webgpu-ctl bench  <sessionId> [nx,ny,nz] [steps] [repeats] [--wait SECONDS]
+  webgpu-ctl custom <sessionId> <shader.wgsl | -> [nx,ny,nz] [steps] [--wait SECONDS]
+Without --wait, submit prints the jobId and returns. With --wait it polls
+until the job finishes (or times out) and prints the full job record.
+"""
+import json
+import sys
+import time
+import urllib.request
+
+BASE = "http://127.0.0.1:8177"
+with open("/opt/webgpu-relay/token") as f:
+    TOKEN = f.read().strip()
+
+
+def call(method, path, obj=None):
+    req = urllib.request.Request(BASE + path, method=method)
+    req.add_header("Authorization", "Bearer " + TOKEN)
+    data = None
+    if obj is not None:
+        data = json.dumps(obj).encode()
+        req.add_header("Content-Type", "application/json")
+    with urllib.request.urlopen(req, data=data, timeout=30) as r:
+        return json.loads(r.read() or b"{}")
+
+
+def wait_job(jid, timeout):
+    deadline = time.time() + timeout
+    while True:
+        rec = call("GET", "/api/jobs/" + jid)
+        if rec["status"] in ("done", "error") or time.time() > deadline:
+            return rec
+        time.sleep(2)
+
+
+def split_wait(args):
+    wait = None
+    out = []
+    i = 0
+    while i < len(args):
+        if args[i] == "--wait":
+            wait = int(args[i + 1])
+            i += 2
+        else:
+            out.append(args[i])
+            i += 1
+    return out, wait
+
+
+def submit(session, job, wait):
+    try:
+        res = call("POST", "/api/jobs", {"sessionId": session, "job": job})
+    except urllib.error.HTTPError as e:
+        print(json.dumps({"error": e.read().decode()}, indent=2))
+        return 1
+    jid = res["jobId"]
+    if wait is None:
+        print(jid)
+        return 0
+    print(json.dumps(wait_job(jid, wait), indent=2))
+    return 0
+
+
+def main(argv):
+    if not argv:
+        print(__doc__)
+        return 2
+    cmd, args = argv[0], argv[1:]
+    if cmd == "sessions":
+        print(json.dumps(call("GET", "/api/sessions"), indent=2))
+        return 0
+    if cmd == "job":
+        print(json.dumps(call("GET", "/api/jobs/" + args[0]), indent=2))
+        return 0
+    if cmd == "submit":
+        args, wait = split_wait(args)
+        src = sys.stdin.read() if args[1] == "-" else open(args[1]).read()
+        return submit(args[0], json.loads(src), wait)
+    if cmd == "reload":
+        args, wait = split_wait(args)
+        return submit(args[0], {"type": "reload"}, 120 if wait is None else wait)
+    if cmd == "parity":
+        args, wait = split_wait(args)
+        job = {"type": "parity",
+               "grid": int(args[1]) if len(args) > 1 else 24,
+               "steps": int(args[2]) if len(args) > 2 else 10}
+        return submit(args[0], job, 300 if wait is None else wait)
+    if cmd == "bench":
+        args, wait = split_wait(args)
+        grid = [int(x) for x in (args[1].split(",") if len(args) > 1 else ["232", "232", "61"])]
+        job = {"type": "bench", "grid": grid,
+               "steps": int(args[2]) if len(args) > 2 else 200,
+               "repeats": int(args[3]) if len(args) > 3 else 1}
+        return submit(args[0], job, 1800 if wait is None else wait)
+    if cmd == "custom":
+        args, wait = split_wait(args)
+        wgsl = sys.stdin.read() if args[1] == "-" else open(args[1]).read()
+        grid = [int(x) for x in (args[2].split(",") if len(args) > 2 else ["64", "64", "64"])]
+        job = {"type": "custom", "name": "custom", "wgsl": wgsl, "grid": grid,
+               "steps": int(args[3]) if len(args) > 3 else 10, "readback": True}
+        return submit(args[0], job, 900 if wait is None else wait)
+    print("unknown command: " + cmd)
+    print(__doc__)
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

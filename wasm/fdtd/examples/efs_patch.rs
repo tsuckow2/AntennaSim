@@ -498,6 +498,29 @@ fn main() {
         }
         return;
     }
+    // Optional NTFF (EFS_NTFF=1): Huygens box inside the CPML,
+    // DFT phasors at 2.40/2.43/2.46 GHz accumulated per step.
+    let mut ntff = if std::env::var("EFS_NTFF").is_ok() {
+        let bx = fdtd::ntff::NtffBox {
+            i0: 16,
+            i1: 45,
+            j0: 16,
+            j1: 45,
+            k0: 16,
+            k1: 220,
+        };
+        let nt = fdtd::ntff::Ntff::new(
+            &sim.grid,
+            bx,
+            (X0 as f64, Y0 as f64, Z0 as f64),
+            vec![2.40e9, 2.43e9, 2.46e9],
+            dt,
+        );
+        println!("NTFF on: {} box samples", nt.n_samples());
+        Some(nt)
+    } else {
+        None
+    };
     let n_steps = (t_end / dt).ceil() as usize;
     println!("running {n_steps} steps ({t_end_ns} ns)...");
     let t_start = std::time::Instant::now();
@@ -505,7 +528,14 @@ fn main() {
     let mut done = 0;
     while done < n_steps {
         let n = chunk.min(n_steps - done);
-        sim.run(n);
+        if let Some(nt) = ntff.as_mut() {
+            for _ in 0..n {
+                sim.step();
+                nt.accumulate(&sim.grid, sim.sim_time() as f64);
+            }
+        } else {
+            sim.run(n);
+        }
         done += n;
         let el = t_start.elapsed().as_secs_f64();
         let (max_ez, arg_ez) = sim
@@ -530,6 +560,36 @@ fn main() {
         );
     }
     println!("wall: {:.1}s", t_start.elapsed().as_secs_f64());
+
+    if let Some(nt) = &ntff {
+        for fi in 0..3 {
+            let f_ghz = [2.40, 2.43, 2.46][fi];
+            let flux = nt.box_flux(fi);
+            let (d, dbi, prad, th, ph) = nt.directivity(fi, 91, 180);
+            println!(
+                "NTFF f={:.2} GHz: box flux={:.4e} W  sphere Prad={:.4e} W  Dmax={:.2} dBi (lin {:.3}) at theta={:.1} phi={:.1}",
+                f_ghz,
+                flux,
+                prad,
+                dbi,
+                d,
+                th.to_degrees(),
+                ph.to_degrees()
+            );
+        }
+        // Principal-plane cuts at 2.43 GHz (dB below max).
+        let (thetas, _phis, u) = nt.far_field(1, 91, 180);
+        let umax = u.iter().cloned().fold(0.0f64, f64::max);
+        for (name, pidx) in [("phi=0 (xz)", 0usize), ("phi=90 (yz)", 45usize)] {
+            let cut: Vec<String> = (0..=18)
+                .map(|ti| {
+                    let uu = u[ti * 5 * 180 + pidx];
+                    format!("{:.0}:{:.1}", thetas[ti * 5].to_degrees(), 10.0 * (uu / umax).log10())
+                })
+                .collect();
+            println!("NTFF cut {name}: {}", cut.join(" "));
+        }
+    }
 
     let (vf, cf) = sim.probe.dft();
     {

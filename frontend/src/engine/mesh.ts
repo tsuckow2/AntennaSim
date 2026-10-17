@@ -30,6 +30,12 @@ import { validateModelIR } from "../dsl/model-ir";
  *   resulting tolerance is conservative. It is additionally capped at
  *   0.25 * port length so a short port (e.g. a 1 mm probe feed) cannot
  *   resolve the opposite terminal's conductor surface as its own.
+ * - A port terminal's facet set is the within-tolerance seed completed to
+ *   the whole connected, coplanar conductor-air patch containing it (see
+ *   resolveTerminal): point distance alone under-covers a terminal face
+ *   whose triangles' nearest points are a quad diagonal away from the
+ *   terminal point, which made the resolved footprint mesh-density
+ *   dependent.
  * - A material counts as a conductor when `conductivity_s_m >= 1e4`; a
  *   material counts as air-like for port candidacy when it is the airbox or
  *   has epsilon_r == 1, mu_r == 1 and no conductivity/loss.
@@ -580,6 +586,11 @@ export function buildFEMMesh(ir: ModelIR, meshSizeM: number, port?: FEMPortTermi
       port.positive[1] - port.negative[1],
       port.positive[2] - port.negative[2],
     );
+    const portDir: Vec3 = [
+      (port.positive[0] - port.negative[0]) / portLengthM,
+      (port.positive[1] - port.negative[1]) / portLengthM,
+      (port.positive[2] - port.negative[2]) / portLengthM,
+    ];
     const resolveTerminal = (terminal: Vec3, label: string): number[] => {
       // Tolerance per contract C: tol = max(1e-6 m, 0.25 * local edge length).
       // Local edge length is approximated by the requested mesh size; grid
@@ -596,11 +607,24 @@ export function buildFEMMesh(ir: ModelIR, meshSizeM: number, port?: FEMPortTermi
       };
       // Candidate facets are conductor-air interfaces only (contract C),
       // collected as indices into boundaryFacets for the ABI port arrays.
-      const candidates: number[] = [];
+      // The point-distance test only *seeds* the terminal patch: a triangle
+      // of the terminal's own face can lie farther than tol from the
+      // terminal point. With the tensor grid's shared Kuhn diagonal, the
+      // two triangles across the diagonal from a centred terminal have
+      // their nearest point on the quad diagonal, half a cell diagonal
+      // away (0.46 mm vs the 0.125 mm tol on the xy = 1.25 mm Snyder mesh),
+      // which silently dropped 2 of the 8 triangles tiling the 1.3 mm
+      // probe face and made the resolved footprint mesh-density dependent.
+      // The seed is therefore completed to the full connected coplanar
+      // conductor-air patch below; the tolerance still decides *which*
+      // patch a terminal belongs to, and the opposite terminal's face (a
+      // port length away, never edge-connected) stays out.
+      const seedFacets: number[] = [];
       for (let f = 0; f < facetCount; f += 1) {
         if (!facetIsConductorAir[f]) continue;
-        if (facetDistanceSq(f) <= tolSq) candidates.push(boundaryIndexOfFacet[f]!);
+        if (facetDistanceSq(f) <= tolSq) seedFacets.push(f);
       }
+      const candidates: number[] = seedFacets.map((f) => boundaryIndexOfFacet[f]!);
       if (candidates.length === 0) {
         // Distinguish "touched the wrong surface" from "touched nothing".
         // Interior same-region faces (e.g. Kuhn diagonal faces) are pure
@@ -613,6 +637,96 @@ export function buildFEMMesh(ir: ModelIR, meshSizeM: number, port?: FEMPortTermi
           throw new Error(`invalid_port_material_contact: ${label} terminal of port ${port.id} is not on a conductor-air interface`);
         }
         throw new Error(`invalid_port_no_contact: ${label} terminal of port ${port.id} touches no mesh facet within tolerance`);
+      }
+      // Patch completion: grow the seed across edge-adjacent conductor-air
+      // facets lying in the seed face's plane. Growth eligibility is
+      // stricter than seed candidacy: a volume conductor against an
+      // air-like region, an exterior conductor face, or a zero-thickness
+      // sheet facet with air on *both* sides. In particular a sheet facet
+      // backed by a dielectric (the ground sheet under the substrate) is
+      // not eligible, so a ground terminal cannot flood its whole sheet.
+      const growthEligible = (f: number): boolean => {
+        const regionA = boxByAttribute.get(facetRegionA[f]!)!;
+        const other = facetRegionB[f]!;
+        if (other === -1) return regionA.conductor;
+        const regionB = boxByAttribute.get(other)!;
+        if (regionA.conductor !== regionB.conductor) {
+          return (regionA.conductor ? regionB : regionA).airLike;
+        }
+        return regionA.airLike && regionB.airLike && boundaryIndexOfFacet[f] !== -1;
+      };
+      // Plane of the seed facet nearest the terminal; grid vertices are
+      // snapped, so coplanar facets are coplanar to float noise.
+      const COPLANAR_TOL_M = 1e-9;
+      let nearest = seedFacets[0]!;
+      let nearestD = Infinity;
+      for (const f of seedFacets) {
+        const d = facetDistanceSq(f);
+        if (d < nearestD) {
+          nearestD = d;
+          nearest = f;
+        }
+      }
+      const pa = vertexCoord(facetVerts[nearest * 3]!);
+      const pb = vertexCoord(facetVerts[nearest * 3 + 1]!);
+      const pc = vertexCoord(facetVerts[nearest * 3 + 2]!);
+      const cross: Vec3 = [
+        (pb[1] - pa[1]) * (pc[2] - pa[2]) - (pb[2] - pa[2]) * (pc[1] - pa[1]),
+        (pb[2] - pa[2]) * (pc[0] - pa[0]) - (pb[0] - pa[0]) * (pc[2] - pa[2]),
+        (pb[0] - pa[0]) * (pc[1] - pa[1]) - (pb[1] - pa[1]) * (pc[0] - pa[0]),
+      ];
+      const crossLen = Math.hypot(cross[0], cross[1], cross[2]);
+      if (crossLen > 0) {
+        const planeNormal: Vec3 = [cross[0] / crossLen, cross[1] / crossLen, cross[2] / crossLen];
+        // Completion applies only when the seed face fronts the port gap,
+        // i.e. its normal is (near-)parallel to the port axis, as for the
+        // facing faces of a probe feed. A terminal on a face that *contains*
+        // the port axis (a coplanar gap port, both terminals on one face)
+        // keeps the seed-only set: completing there would flood the shared
+        // face from both terminals until the sets overlap.
+        const frontsGap =
+          Math.abs(
+            planeNormal[0] * portDir[0] + planeNormal[1] * portDir[1] + planeNormal[2] * portDir[2],
+          ) > 0.5;
+        if (frontsGap) {
+          const inPlane = (f: number): boolean => {
+            for (let k = 0; k < 3; k += 1) {
+              const v = vertexCoord(facetVerts[f * 3 + k]!);
+              const d =
+                (v[0] - pa[0]) * planeNormal[0] +
+                (v[1] - pa[1]) * planeNormal[1] +
+                (v[2] - pa[2]) * planeNormal[2];
+              if (Math.abs(d) > COPLANAR_TOL_M) return false;
+            }
+            return true;
+          };
+          // Edge adjacency among growth-eligible facets (facetVerts indices).
+          const growthEdgeToFacets = new Map<string, number[]>();
+          for (let f = 0; f < facetCount; f += 1) {
+            if (!growthEligible(f)) continue;
+            const vs = [facetVerts[f * 3]!, facetVerts[f * 3 + 1]!, facetVerts[f * 3 + 2]!].sort((x, y) => x - y);
+            for (const [p, q] of [[vs[0], vs[1]], [vs[1], vs[2]], [vs[0], vs[2]]] as const) {
+              const key = `${p},${q}`;
+              const list = growthEdgeToFacets.get(key) ?? [];
+              list.push(f);
+              growthEdgeToFacets.set(key, list);
+            }
+          }
+          const grownVisited = new Set<number>(seedFacets);
+          const grownStack = [...seedFacets];
+          while (grownStack.length > 0) {
+            const f = grownStack.pop()!;
+            const vs = [facetVerts[f * 3]!, facetVerts[f * 3 + 1]!, facetVerts[f * 3 + 2]!].sort((x, y) => x - y);
+            for (const [p, q] of [[vs[0], vs[1]], [vs[1], vs[2]], [vs[0], vs[2]]] as const) {
+              for (const neighbor of growthEdgeToFacets.get(`${p},${q}`) ?? []) {
+                if (grownVisited.has(neighbor) || !inPlane(neighbor)) continue;
+                grownVisited.add(neighbor);
+                candidates.push(boundaryIndexOfFacet[neighbor]!);
+                grownStack.push(neighbor);
+              }
+            }
+          }
+        }
       }
       // Group into edge-connected components; more than one is ambiguous.
       // Note: candidates are indices into boundaryFacets, not facetVerts.

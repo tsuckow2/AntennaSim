@@ -18,9 +18,11 @@
  *
  *   eps_c = eps_r (1 - j tan(d)) - j sigma / (omega eps0)
  *
- * The lumped port is an impressed electric current of 1 A spread uniformly
- * over the active tets near the terminal gap, directed from the negative to
- * the positive terminal. Port voltage is the line integral of E from the
+ * The lumped port is an impressed electric current of 1 A spread over the
+ * active tets intersecting the port prism (the port footprint swept
+ * between the terminal planes), weighted by intersection volume and
+ * directed from the negative to the positive terminal — mirroring
+ * `select_gap_feed` in the Rust solver. Port voltage is the line integral of E from the
  * negative to the positive terminal, so Zin = V / 1A and
  * S11 = (Zin - Z0) / (Zin + Z0).
  *
@@ -978,10 +980,308 @@ export function bicgstab(
 export interface GapFeed {
   /** Active-tet ordinals carrying the impressed current. */
   gapTets: Uint32Array;
+  /**
+   * Per-gap-tet weight: the fraction of the tet's volume inside the port
+   * prism (1 for fully covered tets and for the legacy fallback).
+   */
+  weights: Float64Array;
   gapVolume: number;
   /** Unit vector from the negative to the positive terminal. */
   direction: Vec3;
   gapLength: number;
+  /**
+   * Area of the port footprint (convex hull of the port facet vertices
+   * projected perpendicular to the terminal direction). Equals
+   * gapVolume / gapLength on the legacy fallback path.
+   */
+  footprintArea: number;
+  /** Effective cross-section gapVolume / gapLength. */
+  crossArea: number;
+}
+
+type Vec3Tuple = [number, number, number];
+
+function dot3(a: Vec3Tuple, b: Vec3Tuple): number {
+  return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+}
+
+function cross3(a: Vec3Tuple, b: Vec3Tuple): Vec3Tuple {
+  return [
+    a[1] * b[2] - a[2] * b[1],
+    a[2] * b[0] - a[0] * b[2],
+    a[0] * b[1] - a[1] * b[0],
+  ];
+}
+
+/** Orthonormal basis (u, v) spanning the plane perpendicular to dir, u × v = dir̂. */
+function planeBasis(dir: Vec3Tuple): [Vec3Tuple, Vec3Tuple] {
+  const dl = Math.sqrt(dot3(dir, dir));
+  const d: Vec3Tuple = [dir[0] / dl, dir[1] / dl, dir[2] / dl];
+  let axis = 0;
+  for (let i = 1; i < 3; i += 1) {
+    if (Math.abs(d[i] ?? 0) < Math.abs(d[axis] ?? 0)) axis = i;
+  }
+  const u0: Vec3Tuple = [0, 0, 0];
+  u0[axis] = 1;
+  const dd = dot3(u0, d);
+  const ux = (u0[0] ?? 0) - dd * (d[0] ?? 0);
+  const uy = (u0[1] ?? 0) - dd * (d[1] ?? 0);
+  const uz = (u0[2] ?? 0) - dd * (d[2] ?? 0);
+  const un = Math.hypot(ux, uy, uz);
+  const u: Vec3Tuple = [ux / un, uy / un, uz / un];
+  return [u, cross3(d, u)];
+}
+
+/** Monotone-chain convex hull; returns CCW hull vertices and signed area. */
+function convexHull2d(points: Array<[number, number]>): { hull: Array<[number, number]>; area: number } {
+  const pts = points
+    .map((p): [number, number] => [p[0] ?? 0, p[1] ?? 0])
+    .sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+  const dedup: Array<[number, number]> = [];
+  for (const p of pts) {
+    const last = dedup[dedup.length - 1];
+    if (!last || Math.abs(last[0] - p[0]) >= 1e-15 || Math.abs(last[1] - p[1]) >= 1e-15) dedup.push(p);
+  }
+  if (dedup.length < 3) return { hull: [], area: 0 };
+  const cross2 = (o: [number, number], a: [number, number], b: [number, number]): number =>
+    (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
+  const lower: Array<[number, number]> = [];
+  for (const p of dedup) {
+    while (
+      lower.length >= 2 &&
+      cross2(lower[lower.length - 2]!, lower[lower.length - 1]!, p) <= 0
+    ) {
+      lower.pop();
+    }
+    lower.push(p);
+  }
+  const upper: Array<[number, number]> = [];
+  for (let i = dedup.length - 1; i >= 0; i -= 1) {
+    const p = dedup[i]!;
+    while (
+      upper.length >= 2 &&
+      cross2(upper[upper.length - 2]!, upper[upper.length - 1]!, p) <= 0
+    ) {
+      upper.pop();
+    }
+    upper.push(p);
+  }
+  lower.pop();
+  upper.pop();
+  const hull = [...lower, ...upper];
+  let area2 = 0;
+  for (let i = 0; i < hull.length; i += 1) {
+    const a = hull[i]!;
+    const b = hull[(i + 1) % hull.length]!;
+    area2 += a[0] * b[1] - b[0] * a[1];
+  }
+  return { hull, area: area2 / 2 };
+}
+
+interface PortPrism {
+  /** Half-spaces n·p <= c. */
+  planes: Array<[Vec3Tuple, number]>;
+  aabbLo: Vec3Tuple;
+  aabbHi: Vec3Tuple;
+  footprintArea: number;
+}
+
+/** Build the port prism from the mesh's port facet sets; null when degenerate. */
+function portPrismFromFacets(
+  mesh: FEMMeshArtifact,
+  positive: Vec3,
+  negative: Vec3,
+  direction: Vec3Tuple,
+  gapLength: number,
+): PortPrism | null {
+  if (mesh.portPositiveFacets.length === 0 || mesh.portNegativeFacets.length === 0) return null;
+  const [u, v] = planeBasis(direction);
+  const pts2: Array<[number, number]> = [];
+  for (const facets of [mesh.portPositiveFacets, mesh.portNegativeFacets]) {
+    for (const f of facets) {
+      const base = (f ?? 0) * 3;
+      for (let k = 0; k < 3; k += 1) {
+        const vid = mesh.boundaryFacets[base + k] ?? 0;
+        const px = (mesh.vertices[vid * 3] ?? 0) - (negative[0] ?? 0);
+        const py = (mesh.vertices[vid * 3 + 1] ?? 0) - (negative[1] ?? 0);
+        const pz = (mesh.vertices[vid * 3 + 2] ?? 0) - (negative[2] ?? 0);
+        pts2.push([
+          px * (u[0] ?? 0) + py * (u[1] ?? 0) + pz * (u[2] ?? 0),
+          px * (v[0] ?? 0) + py * (v[1] ?? 0) + pz * (v[2] ?? 0),
+        ]);
+      }
+    }
+  }
+  const { hull, area } = convexHull2d(pts2);
+  if (hull.length < 3 || !(Math.abs(area) > 0)) return null;
+  const footprintArea = Math.abs(area);
+  const ordered = area < 0 ? [...hull].reverse() : hull;
+
+  const negT: Vec3Tuple = [negative[0] ?? 0, negative[1] ?? 0, negative[2] ?? 0];
+  const planes: Array<[Vec3Tuple, number]> = [];
+  planes.push([
+    [-direction[0], -direction[1], -direction[2]],
+    -dot3(negT, direction),
+  ]);
+  planes.push([
+    direction,
+    (positive[0] ?? 0) * direction[0] +
+      (positive[1] ?? 0) * direction[1] +
+      (positive[2] ?? 0) * direction[2],
+  ]);
+  const at = (q: [number, number]): Vec3Tuple => [
+    negT[0] + q[0] * (u[0] ?? 0) + q[1] * (v[0] ?? 0),
+    negT[1] + q[0] * (u[1] ?? 0) + q[1] * (v[1] ?? 0),
+    negT[2] + q[0] * (u[2] ?? 0) + q[1] * (v[2] ?? 0),
+  ];
+  for (let i = 0; i < ordered.length; i += 1) {
+    const a3 = at(ordered[i]!);
+    const b3 = at(ordered[(i + 1) % ordered.length]!);
+    const e: Vec3Tuple = [b3[0] - a3[0], b3[1] - a3[1], b3[2] - a3[2]];
+    const n0 = cross3(direction, e);
+    const nn = Math.hypot(n0[0], n0[1], n0[2]);
+    const n: Vec3Tuple = [n0[0] / nn, n0[1] / nn, n0[2] / nn];
+    planes.push([[-n[0], -n[1], -n[2]], -dot3(n, a3)]);
+  }
+
+  const aabbLo: Vec3Tuple = [Infinity, Infinity, Infinity];
+  const aabbHi: Vec3Tuple = [-Infinity, -Infinity, -Infinity];
+  for (const q of ordered) {
+    for (const t of [0, gapLength]) {
+      const base = at(q);
+      for (let c = 0; c < 3; c += 1) {
+        const p = (base[c] ?? 0) + t * (direction[c] ?? 0);
+        if (p < (aabbLo[c] ?? Infinity)) aabbLo[c] = p;
+        if (p > (aabbHi[c] ?? -Infinity)) aabbHi[c] = p;
+      }
+    }
+  }
+  return { planes, aabbLo, aabbHi, footprintArea };
+}
+
+/** Clip a convex polyhedron (outward-oriented point-list faces) by n·p <= c. */
+function clipPolyhedron(faces: Vec3Tuple[][], n: Vec3Tuple, c: number): Vec3Tuple[][] {
+  const TOL = 1e-12;
+  const dist = (p: Vec3Tuple): number => dot3(n, p) - c;
+  const out: Vec3Tuple[][] = [];
+  const cap: Vec3Tuple[] = [];
+  let anyOutside = false;
+  for (const face of faces) {
+    const m = face.length;
+    if (m === 0) continue;
+    const poly: Vec3Tuple[] = [];
+    for (let i = 0; i < m; i += 1) {
+      const cur = face[i]!;
+      const nxt = face[(i + 1) % m]!;
+      const dc = dist(cur);
+      const dn = dist(nxt);
+      if (dc > TOL) anyOutside = true;
+      if (dc <= TOL) {
+        poly.push(cur);
+        if (Math.abs(dc) <= TOL) cap.push(cur);
+      }
+      if ((dc < -TOL && dn > TOL) || (dc > TOL && dn < -TOL)) {
+        const t = dc / (dc - dn);
+        const p: Vec3Tuple = [
+          cur[0] + t * (nxt[0] - cur[0]),
+          cur[1] + t * (nxt[1] - cur[1]),
+          cur[2] + t * (nxt[2] - cur[2]),
+        ];
+        poly.push(p);
+        cap.push(p);
+      }
+    }
+    if (poly.length >= 3) out.push(poly);
+  }
+  if (out.length === 0 || !anyOutside) return out;
+  const uniq: Vec3Tuple[] = [];
+  for (const p of cap) {
+    if (
+      !uniq.some(
+        (q) => Math.abs(q[0] - p[0]) < 1e-12 && Math.abs(q[1] - p[1]) < 1e-12 && Math.abs(q[2] - p[2]) < 1e-12,
+      )
+    ) {
+      uniq.push(p);
+    }
+  }
+  if (uniq.length >= 3) {
+    const cen: Vec3Tuple = [0, 0, 0];
+    for (const p of uniq) {
+      cen[0] += p[0];
+      cen[1] += p[1];
+      cen[2] += p[2];
+    }
+    cen[0] /= uniq.length;
+    cen[1] /= uniq.length;
+    cen[2] /= uniq.length;
+    const [e1, e2] = planeBasis(n);
+    const angle = (p: Vec3Tuple): number => {
+      const d: Vec3Tuple = [p[0] - cen[0], p[1] - cen[1], p[2] - cen[2]];
+      return Math.atan2(dot3(d, e2), dot3(d, e1));
+    };
+    uniq.sort((a, b) => angle(a) - angle(b));
+    const nn: Vec3Tuple = [0, 0, 0];
+    for (let i = 0; i < uniq.length; i += 1) {
+      const a = uniq[i]!;
+      const b = uniq[(i + 1) % uniq.length]!;
+      nn[0] += (a[1] - b[1]) * (a[2] + b[2]);
+      nn[1] += (a[2] - b[2]) * (a[0] + b[0]);
+      nn[2] += (a[0] - b[0]) * (a[1] + b[1]);
+    }
+    if (dot3(nn, n) < 0) uniq.reverse();
+    out.push(uniq);
+  }
+  return out;
+}
+
+/** Volume of tet ∩ prism for a tetrahedron given by its 4 vertices. */
+function tetPrismIntersectionVolume(prism: PortPrism, verts: Vec3Tuple[]): number {
+  let faces: Vec3Tuple[][] = [];
+  const combos: Array<[number, number, number, number]> = [
+    [0, 1, 2, 3],
+    [0, 3, 1, 2],
+    [0, 2, 3, 1],
+    [1, 3, 2, 0],
+  ];
+  for (const [a, b, c, o] of combos) {
+    const pa = verts[a]!;
+    const pb = verts[b]!;
+    const pc = verts[c]!;
+    const po = verts[o]!;
+    const nrm = cross3(
+      [pb[0] - pa[0], pb[1] - pa[1], pb[2] - pa[2]],
+      [pc[0] - pa[0], pc[1] - pa[1], pc[2] - pa[2]],
+    );
+    const away = dot3(nrm, [po[0] - pa[0], po[1] - pa[1], po[2] - pa[2]]);
+    faces.push(away > 0 ? [pa, pc, pb] : [pa, pb, pc]);
+  }
+  for (const [n, c] of prism.planes) {
+    faces = clipPolyhedron(faces, n, c);
+    if (faces.length === 0) return 0;
+  }
+  let vol6 = 0;
+  for (const face of faces) {
+    for (let i = 1; i + 1 < face.length; i += 1) {
+      vol6 += dot3(face[0]!, cross3(face[i]!, face[i + 1]!));
+    }
+  }
+  return Math.abs(vol6 / 6);
+}
+
+/** Solve-time sanity log: effective cross-section vs footprint area. */
+function logCrossSection(feed: GapFeed): void {
+  const dev =
+    feed.footprintArea > 0
+      ? Math.abs(feed.crossArea - feed.footprintArea) / feed.footprintArea
+      : 0;
+  const msg =
+    `gap feed: ${feed.gapTets.length} tets, A_cross = ${(feed.crossArea * 1e6).toFixed(4)} mm^2, ` +
+    `footprint = ${(feed.footprintArea * 1e6).toFixed(4)} mm^2, deviation = ${(dev * 100).toFixed(1)}%`;
+  if (dev > 0.1) {
+    console.warn(`${msg} — WARNING: A_cross deviates from the port footprint by more than 10%`);
+  } else {
+    console.debug(msg);
+  }
 }
 
 function pointSegmentDistanceSq(p: Vec3, a: Vec3, b: Vec3): number {
@@ -1001,9 +1301,17 @@ function pointSegmentDistanceSq(p: Vec3, a: Vec3, b: Vec3): number {
 }
 
 /**
- * Select the active tets around the port terminal gap that carry the
- * impressed-current feed. Starts with a radius of 0.6 gap lengths around the
- * terminal segment and grows it until at least one tet is found.
+ * Select the active tets carrying the port feed.
+ *
+ * Primary rule: prism intersection — every active tet intersecting the
+ * swept port footprint (convex hull of the port facet vertices projected
+ * perpendicular to the terminal direction, swept between the terminal
+ * planes) contributes, weighted by its intersection-volume fraction, so
+ * the effective gap volume is the prism volume on any mesh and the source
+ * definition no longer depends on tet-centroid alignment with the port
+ * axis (the failure mode of the legacy rule — see the FEM port audit).
+ * Falls back to the legacy centroid-radius rule when the facet data
+ * cannot define a prism or nothing intersects it.
  */
 export function selectGapFeed(
   mesh: FEMMeshArtifact,
@@ -1019,6 +1327,64 @@ export function selectGapFeed(
     throw new Error("Lumped-port terminals must be distinct points");
   }
   const direction: Vec3 = [gx / gapLength, gy / gapLength, gz / gapLength];
+
+  const prism = portPrismFromFacets(
+    mesh,
+    positive,
+    negative,
+    [direction[0] ?? 0, direction[1] ?? 0, direction[2] ?? 0],
+    gapLength,
+  );
+  if (prism) {
+    const gapTets: number[] = [];
+    const weights: number[] = [];
+    let gapVolume = 0;
+    for (let t = 0; t < system.activeTetCount; t += 1) {
+      const tet = system.activeTets[t] ?? 0;
+      const verts: Vec3Tuple[] = [];
+      let lo: Vec3Tuple = [Infinity, Infinity, Infinity];
+      let hi: Vec3Tuple = [-Infinity, -Infinity, -Infinity];
+      for (let k = 0; k < 4; k += 1) {
+        const vid = mesh.tetrahedra[tet * 4 + k] ?? 0;
+        const p: Vec3Tuple = [
+          mesh.vertices[vid * 3] ?? 0,
+          mesh.vertices[vid * 3 + 1] ?? 0,
+          mesh.vertices[vid * 3 + 2] ?? 0,
+        ];
+        verts.push(p);
+        lo = [Math.min(lo[0], p[0]), Math.min(lo[1], p[1]), Math.min(lo[2], p[2])];
+        hi = [Math.max(hi[0], p[0]), Math.max(hi[1], p[1]), Math.max(hi[2], p[2])];
+      }
+      let outside = false;
+      for (let c = 0; c < 3; c += 1) {
+        if (hi[c]! < prism.aabbLo[c]! - 1e-12 || lo[c]! > prism.aabbHi[c]! + 1e-12) outside = true;
+      }
+      if (outside) continue;
+      const vInt = tetPrismIntersectionVolume(prism, verts);
+      if (vInt <= 1e-15) continue;
+      const vTet = tetGeometry(mesh.vertices, mesh.tetrahedra, tet).volume;
+      const w = Math.min(1, Math.max(0, vInt / vTet));
+      if (w <= 1e-9) continue;
+      gapTets.push(t);
+      weights.push(w);
+      gapVolume += vInt;
+    }
+    if (gapTets.length > 0 && gapVolume > 0) {
+      const feed: GapFeed = {
+        gapTets: Uint32Array.from(gapTets),
+        weights: Float64Array.from(weights),
+        gapVolume,
+        direction,
+        gapLength,
+        footprintArea: prism.footprintArea,
+        crossArea: gapVolume / gapLength,
+      };
+      logCrossSection(feed);
+      return feed;
+    }
+  }
+
+  // Legacy fallback: centroid-radius selection around the terminal segment.
   let selected: number[] = [];
   let radius = 0.6 * gapLength;
   for (let attempt = 0; attempt < 6 && selected.length === 0; attempt += 1) {
@@ -1056,7 +1422,17 @@ export function selectGapFeed(
     gapVolume += tetGeometry(mesh.vertices, mesh.tetrahedra, tet).volume;
   }
   if (!(gapVolume > 0)) throw new Error("Port feed region has no volume");
-  return { gapTets: Uint32Array.from(selected), gapVolume, direction, gapLength };
+  const feed: GapFeed = {
+    gapTets: Uint32Array.from(selected),
+    weights: new Float64Array(selected.length).fill(1),
+    gapVolume,
+    direction,
+    gapLength,
+    footprintArea: gapVolume / gapLength,
+    crossArea: gapVolume / gapLength,
+  };
+  logCrossSection(feed);
+  return feed;
 }
 
 /**
@@ -1077,8 +1453,13 @@ function buildPortRhs(
   // The impressed density J = d_hat / A_cross (1 A through any gap
   // cross-section) with A_cross = V_gap / L_gap for the prismatic gap, so
   // J = L_gap * d_hat / V_gap and the port current is exactly 1 A.
+  // Each gap tet's moment is weighted by its prism intersection fraction,
+  // mirroring the Rust solver.
   const coef = ((-omega * MU0) * feed.gapLength) / feed.gapVolume;
-  for (const t of feed.gapTets) {
+  for (let gi = 0; gi < feed.gapTets.length; gi += 1) {
+    const t = feed.gapTets[gi] ?? 0;
+    const w = feed.weights[gi] ?? 1;
+    if (w === 0) continue;
     const tet = system.activeTets[t] ?? 0;
     const geom = tetGeometry(mesh.vertices, mesh.tetrahedra, tet);
     const grad = geom.grad;
@@ -1102,7 +1483,9 @@ function buildPortRhs(
       const iz = f * ((grad[b * 3 + 2] ?? 0) - (grad[a * 3 + 2] ?? 0));
       im[d] =
         (im[d] ?? 0) +
-        coef * ((feed.direction[0] ?? 0) * ix + (feed.direction[1] ?? 0) * iy + (feed.direction[2] ?? 0) * iz);
+        coef *
+          w *
+          ((feed.direction[0] ?? 0) * ix + (feed.direction[1] ?? 0) * iy + (feed.direction[2] ?? 0) * iz);
     }
   }
   return { re, im };

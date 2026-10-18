@@ -1,8 +1,8 @@
 //! End-to-end single-frequency solve orchestration.
 //!
 //! Pipeline: request → validated mesh → global edges (PEC eliminated) →
-//! H(curl) assembly (volume + Silver–Müller ABC) → one-amp gap feed →
-//! BiCGSTAB/SGS → port voltage → Zin (= V at 1 A) → S11 → best-effort
+//! H(curl) assembly (volume + Silver–Müller ABC) → gap or coax feed →
+//! BiCGSTAB/AMS (SGS fallback) → port impedance → S11 → best-effort
 //! Stratton–Chu far-field.
 //!
 //! Mirrors the TypeScript `solveFEMPoint` stage order and failure semantics:
@@ -15,6 +15,7 @@ use num_complex::Complex64;
 use crate::clock::Stopwatch;
 
 use crate::abi::{FarFieldBlob, PointRequest, PointResponse, TimingMs};
+use crate::ams::AmsPreconditioner;
 use crate::assembly::assemble_hcurl;
 use crate::budget::Budget;
 use crate::edge::build_edge_system;
@@ -105,14 +106,31 @@ pub fn solve_point(request: &PointRequest, budget: &Budget) -> Result<PointRespo
         let feed = select_gap_feed(&mesh, &sys, positive, negative)?;
         build_port_rhs(&mesh, &sys, &feed, frequency_hz)?
     };
-    let kry = bicgstab(
-        &matrix,
-        &rhs,
-        request.metadata.krylov_tolerance(),
-        DEFAULT_MAX_ITER,
-        Preconditioner::Sgs,
-        budget,
-    )?;
+    // AMS (auxiliary-space Maxwell) preconditioning is the production
+    // default: SGS does not converge on Snyder-class meshes at all
+    // (12,000 iterations to residual 1.2e-5 where AMS needs ~400), for
+    // both the gap and coax feeds. If the AMS build itself fails
+    // (degenerate auxiliary space), fall back to SGS so small or
+    // unusual problems keep the historical behavior.
+    let tol = request.metadata.krylov_tolerance();
+    let kry = match AmsPreconditioner::build(&mesh, &sys, &matrix) {
+        Ok(ams) => bicgstab(
+            &matrix,
+            &rhs,
+            tol,
+            DEFAULT_MAX_ITER,
+            Preconditioner::Ams(ams),
+            budget,
+        )?,
+        Err(_) => bicgstab(
+            &matrix,
+            &rhs,
+            tol,
+            DEFAULT_MAX_ITER,
+            Preconditioner::Sgs,
+            budget,
+        )?,
+    };
     timing.solve = t1.elapsed_ms();
     let t2 = Stopwatch::start();
 

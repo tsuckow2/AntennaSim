@@ -4,7 +4,11 @@
 //! (`dipoleIR()`, `buildFEMMesh(ir, 0.004)`) by `tools/pack_dipole.ts`.
 //! Reference values (TS, 2026-09-25):
 //!   Zin = 66.637496 − j15.317936 Ω, S11 = 0.157179 − j0.110687,
-//!   1117 iterations, residual 8.15e-8, 19,561 free DOFs.
+//!   1117 iterations (TS SGS), residual 8.15e-8, 19,561 free DOFs.
+//! The Rust production path switched from SGS to AMS preconditioning
+//! on 2026-10-18; Zin/S11 parity is unchanged, but the iteration
+//! count is now ~77 — the count is a preconditioner property, not a
+//! parity signal, so it is only bounded above.
 
 use hcurl_fem::abi::{FarFieldBlob, PointRequest};
 use hcurl_fem::budget::Budget;
@@ -36,10 +40,12 @@ fn dipole_impedance_and_s11_match_typescript() {
     let ds = ((s11.re - 0.157179).powi(2) + (s11.im + 0.110687).powi(2)).sqrt();
     assert!(ds < 0.01, "S11 drifted: {s11:?}");
 
-    // Similar iteration count (same algorithm, same preconditioner).
+    // AMS converges this system in ~77 iterations (vs 1117 for the TS
+    // SGS reference). Bound the count well below the SGS figure so a
+    // silent fallback to SGS-grade convergence is caught.
     assert!(
-        (500..=3000).contains(&iters),
-        "iteration count {iters} far from TS reference 1117"
+        iters <= 500,
+        "iteration count {iters} suggests AMS is not in effect (TS SGS reference: 1117)"
     );
     assert!(residual < 1e-6, "residual {residual:e} too large");
 

@@ -204,7 +204,10 @@ fn main() {
         }
     }
     println!("wall: {:.1}s", t0.elapsed().as_secs_f64());
-    let _ = std::fs::remove_file(&ckpt);
+    // NOTE: the checkpoint is deleted only AFTER the results are
+    // printed below — the far-field evaluation takes minutes, and
+    // deleting at the end of stepping lost a finished run's last
+    // two frequencies to a restart on 2026-10-18.
 
     let (vf, cf) = sim.probe.dft();
     let n = sim.probe.len() as f64;
@@ -236,4 +239,5 @@ fn main() {
             10.0 * gain.log10()
         );
     }
+    let _ = std::fs::remove_file(&ckpt);
 }

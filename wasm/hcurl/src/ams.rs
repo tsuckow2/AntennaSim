@@ -189,14 +189,17 @@ impl AmsPreconditioner {
         }
 
         // A_n[i][j] = Σ_{e∋i} Σ_{(f,aval)∈A.row(e)} Σ_{k∈{uf,vf}}
-        //            s(e,i)·s(f,k)·aval.  Direct triplet assembly of GᵀAG.
-        let mut an_trip: Vec<(usize, usize, Complex64)> = Vec::new();
+        //            s(e,i)·s(f,k)·aval.  GᵀAG assembled row by row:
+        // the raw contribution count is ~40× the final nnz, and holding
+        // it as one triplet list OOM-killed a 1.5M-DOF build on a 7 GB
+        // host; per-row lists keep peak memory at the final matrix size.
+        let mut an_rows: Vec<Vec<(usize, Complex64)>> = vec![Vec::new(); node_count];
         for i_node in 0..nv {
             let i = node_dof[i_node];
             if i < 0 {
                 continue;
             }
-            let i = i as usize;
+            let row = &mut an_rows[i as usize];
             for &(e, se) in &node_edges[i_node] {
                 let (cols, vals) = a.row(e);
                 for (&f, &aval) in cols.iter().zip(vals.iter()) {
@@ -207,12 +210,12 @@ impl AmsPreconditioner {
                     // G[e,i]·A[e,f]·G[f,j], with G[f,ju] = −1/l_f,
                     // G[f,jv] = +1/l_f.
                     let c = aval * se * dof_inv_len[f];
-                    an_trip.push((i, ju, -c));
-                    an_trip.push((i, jv, c));
+                    row.push((ju, -c));
+                    row.push((jv, c));
                 }
             }
         }
-        let a_nodal = CsrMatrix::from_triplets(node_count, node_count, an_trip);
+        let a_nodal = CsrMatrix::from_rows(node_count, node_count, an_rows);
         let nodal_sgs = PreconditionerData::new(&a_nodal);
 
         // PEC-boundary node mask (incident to >= 1 eliminated edge), over

@@ -75,6 +75,53 @@ impl CsrMatrix {
         }
     }
 
+    /// Build from per-row entry lists: `rows[i]` holds row `i`'s
+    /// `(column, value)` pairs in any order, duplicates allowed. The
+    /// result is identical to collecting every entry as a triplet and
+    /// calling [`Self::from_triplets`] (duplicates summed in insertion
+    /// order, explicit zeros dropped, columns sorted ascending) — but
+    /// peak memory stays proportional to the final nnz instead of the
+    /// raw entry count, which matters when a product like GᵀAG expands
+    /// each output entry into many contributions.
+    pub fn from_rows(nrows: usize, ncols: usize, rows: Vec<Vec<(usize, Complex64)>>) -> Self {
+        assert_eq!(rows.len(), nrows, "from_rows: row count mismatch");
+        let mut row_ptr = vec![0usize; nrows + 1];
+        let mut col_idx: Vec<usize> = Vec::new();
+        let mut values: Vec<Complex64> = Vec::new();
+        for (r, mut row) in rows.into_iter().enumerate() {
+            for &(c, _) in &row {
+                assert!(c < ncols, "row entry col {c} out of bounds ({ncols})");
+            }
+            row.sort_by(|a, b| a.0.cmp(&b.0));
+            let mut iter = row.into_iter().peekable();
+            while let Some((c, mut v)) = iter.next() {
+                while let Some(&(c2, v2)) = iter.peek() {
+                    if c2 == c {
+                        v += v2;
+                        iter.next();
+                    } else {
+                        break;
+                    }
+                }
+                if v != Complex64::new(0.0, 0.0) {
+                    col_idx.push(c);
+                    values.push(v);
+                    row_ptr[r + 1] += 1;
+                }
+            }
+        }
+        for i in 0..nrows {
+            row_ptr[i + 1] += row_ptr[i];
+        }
+        Self {
+            nrows,
+            ncols,
+            row_ptr,
+            col_idx,
+            values,
+        }
+    }
+
     /// All-zero matrix with the given shape.
     pub fn zeros(nrows: usize, ncols: usize) -> Self {
         Self {
@@ -194,6 +241,31 @@ mod tests {
         let (cols, vals) = a.row(1);
         assert_eq!(cols, &[0]);
         assert_eq!(vals, &[c(3.0, 0.0)]);
+    }
+
+    #[test]
+    fn from_rows_matches_from_triplets() {
+        // Same entries through both constructors: duplicates (including
+        // a pair that cancels to an explicit zero), unsorted columns.
+        let triplets = vec![
+            (2, 0, c(1.0, 1.0)),
+            (0, 2, c(0.0, 1.0)),
+            (2, 0, c(2.0, 0.0)),
+            (1, 1, c(1.0, 0.0)),
+            (1, 1, c(-1.0, 0.0)), // sums to zero: dropped
+            (0, 0, c(3.0, -1.0)),
+            (2, 2, c(0.0, 0.0)), // explicit zero: dropped
+        ];
+        let a = CsrMatrix::from_triplets(3, 3, triplets.clone());
+        let mut rows: Vec<Vec<(usize, Complex64)>> = vec![Vec::new(); 3];
+        for (r, col, v) in &triplets {
+            rows[*r].push((*col, *v));
+        }
+        let b = CsrMatrix::from_rows(3, 3, rows);
+        assert_eq!(a.nnz(), b.nnz());
+        for i in 0..3 {
+            assert_eq!(a.row(i), b.row(i), "row {i}");
+        }
     }
 
     #[test]

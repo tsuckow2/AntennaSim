@@ -91,6 +91,9 @@ pub struct Ntff {
     dt: f64,
     steps: usize,
     samples: Vec<Sample>,
+    /// Reused per-step gather buffer (was a fresh allocation per
+    /// step — a measurable slice of the accumulation cost).
+    scratch: Vec<[f64; 4]>,
     /// Face sample ranges in push order: [+z, −z, +x, −x, +y, −y].
     face_ranges: [(usize, usize); 6],
     /// acc[freq][sample] = [E_a, E_b, H_a, H_b] raw DFT sums.
@@ -272,6 +275,7 @@ impl Ntff {
             freqs,
             dt: dt as f64,
             steps: 0,
+            scratch: vec![[0.0; 4]; samples.len()],
             samples,
             face_ranges,
             acc,
@@ -282,21 +286,53 @@ impl Ntff {
         self.samples.len()
     }
 
+    /// Checkpoint export: (steps, accumulator re/im flattened in
+    /// [freq][sample][comp] order). For long NTFF runs that must
+    /// survive process/machine restarts.
+    pub fn export_state(&self) -> (usize, Vec<f64>) {
+        let mut out = Vec::with_capacity(self.acc.len() * self.samples.len() * 8);
+        for f in &self.acc {
+            for s in f {
+                for c in s {
+                    out.push(c.re);
+                    out.push(c.im);
+                }
+            }
+        }
+        (self.steps, out)
+    }
+
+    /// Restore a state produced by `export_state` (same box/freqs).
+    pub fn import_state(&mut self, steps: usize, data: &[f64]) {
+        let mut it = data.iter();
+        for f in &mut self.acc {
+            for s in f.iter_mut() {
+                for c in s.iter_mut() {
+                    c.re = *it.next().expect("ntff state size");
+                    c.im = *it.next().expect("ntff state size");
+                }
+            }
+        }
+        assert!(it.next().is_none(), "ntff state size mismatch");
+        self.steps = steps;
+    }
+
     /// Accumulate one step. Call AFTER `Fdtd::step` with `t_e` = the
     /// E-field time level just produced (steps_done · dt); H is
     /// phased at t_e − dt/2 automatically.
     pub fn accumulate(&mut self, g: &YeeGrid, t_e: f64) {
         self.steps += 1;
-        // Gather the colocated tangential components once per step.
-        let mut vals: Vec<[f64; 4]> = Vec::with_capacity(self.samples.len());
-        for s in &self.samples {
-            vals.push([
+        // Gather the colocated tangential components once per step
+        // into the reusable scratch buffer.
+        for (si, s) in self.samples.iter().enumerate() {
+            self.scratch[si] = [
                 gather_e(g, s, 0),
                 gather_e(g, s, 1),
                 gather_h(g, s, 0),
                 gather_h(g, s, 1),
-            ]);
+            ];
         }
+        let vals = &self.scratch;
         for (fi, &f) in self.freqs.iter().enumerate() {
             let w = 2.0 * std::f64::consts::PI * f;
             let pe = C64::new((w * t_e).cos(), -(w * t_e).sin());

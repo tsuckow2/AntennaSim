@@ -146,6 +146,18 @@ impl DftProbe {
         self.v_series.len()
     }
 
+    /// Checkpoint export of the recorded series.
+    pub fn export_series(&self) -> (Vec<f32>, Vec<f32>) {
+        (self.v_series.clone(), self.i_series.clone())
+    }
+
+    /// Restore series exported by `export_series`.
+    pub fn import_series(&mut self, v: Vec<f32>, i: Vec<f32>) {
+        assert_eq!(v.len(), i.len());
+        self.v_series = v;
+        self.i_series = i;
+    }
+
     /// Last |V| relative to max |V|: ringdown diagnostic.
     pub fn tail_ratio(&self) -> f32 {
         if self.v_series.is_empty() {

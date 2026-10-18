@@ -166,6 +166,20 @@ impl Cpml {
             })
             .collect()
     }
+
+    /// Restore ψ state from a snapshot taken on an identically
+    /// built Cpml (checkpoint/resume for long runs). Coefficients
+    /// are deterministic from construction and are not touched.
+    pub fn restore_psi(&mut self, snap: &[PmlFaceData]) {
+        assert_eq!(snap.len(), self.faces.len());
+        for (f, s) in self.faces.iter_mut().zip(snap.iter()) {
+            assert_eq!(f.psi_a.len(), s.psi_a.len());
+            f.psi_a.copy_from_slice(&s.psi_a);
+            f.psi_b.copy_from_slice(&s.psi_b);
+            f.psi_c.copy_from_slice(&s.psi_c);
+            f.psi_d.copy_from_slice(&s.psi_d);
+        }
+    }
 }
 
 impl Cpml {

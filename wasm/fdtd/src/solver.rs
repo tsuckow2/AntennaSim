@@ -169,6 +169,15 @@ impl Fdtd {
         self.step
     }
 
+    /// Restore the step clock after a checkpoint resume: sets the
+    /// step counter and t = step·dt. (The live clock accumulates
+    /// t += dt in f32; the difference is far below any timescale
+    /// the source or DFT cares about after the excitation pulse.)
+    pub fn restore_clock(&mut self, step: usize) {
+        self.step = step;
+        self.t = step as f32 * self.dt;
+    }
+
     pub fn sim_time(&self) -> f32 {
         self.t
     }

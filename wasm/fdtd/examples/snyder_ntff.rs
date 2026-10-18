@@ -137,6 +137,10 @@ fn main() {
     println!("ntff samples: {}", ntff.n_samples());
 
     let n_steps = (t_ns * 1e-9 / dt as f64).ceil() as usize;
+    let n_steps = std::env::var("SNYDER_NTFF_STEPS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(n_steps);
     let mut start = 0usize;
     if let Ok(bytes) = std::fs::read(&ckpt) {
         let mut rd = Rd { b: &bytes, p: 0 };
@@ -211,6 +215,26 @@ fn main() {
         }
     }
     println!("wall: {:.1}s", t0.elapsed().as_secs_f64());
+    if std::env::var("SNYDER_NTFF_DUMP").is_ok() {
+        // Parity-gate dump: scaled phasors (H negated) at freq 0 for
+        // a few samples + raw |acc| sums per frequency.
+        for si in [0usize, 1, 1000, 50000, ntff.n_samples() - 1] {
+            let ph = ntff.sample_phasors(0, si);
+            println!(
+                "probe si={si} {}",
+                ph.iter()
+                    .map(|(r, i)| format!("{r:.6e},{i:.6e}"))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            );
+        }
+        let (_, acc) = ntff.export_state();
+        let per = ntff.n_samples() * 8;
+        for fi in 0..ntff_freqs.len() {
+            let s: f64 = acc[fi * per..(fi + 1) * per].iter().map(|x| x.abs()).sum();
+            println!("accAbsSum f{fi} {s:.5e}");
+        }
+    }
     // NOTE: the checkpoint is deleted only AFTER the results are
     // printed below — the far-field evaluation takes minutes, and
     // deleting at the end of stepping lost a finished run's last

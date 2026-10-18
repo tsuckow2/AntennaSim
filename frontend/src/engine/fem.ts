@@ -2,6 +2,7 @@ import type { ModelIR } from "../dsl/model-ir";
 import { validateModelIR } from "../dsl/model-ir";
 import type { FEMMeshArtifact } from "./mesh";
 import type { FrequencyResult } from "../api/nec";
+import { identifyResonance, type ReactanceCrossing } from "../utils/resonance";
 
 export type FEMPointStatus = "ok" | "non_finite" | "solver_error" | "cancelled" | "timeout";
 
@@ -177,6 +178,36 @@ export function adaptFEMFrequencyData(
       swr: computeFEMSWR(safeS11Real, safeS11Imag),
     };
   });
+}
+
+/**
+ * Identify the sweep's resonant frequency from its solved points, or
+ * null when no reactance crossing qualifies as a resonance. Delegates
+ * to `identifyResonance` (utils/resonance): a crossing must carry at
+ * least a quarter of the sweep's peak Re(Z) — rejecting the shallow
+ * series-type crossing a patch shows above its parallel resonance —
+ * and, among qualifying crossings, the one nearest the minimum-|S11|
+ * point wins. Only "ok" points with finite impedance participate.
+ */
+export function identifyFEMResonance(
+  points: readonly FEMFrequencyPoint[],
+): ReactanceCrossing | null {
+  const samples = points.flatMap((point) => {
+    if (
+      point.point_status !== "ok"
+      || point.impedance_real_ohms == null
+      || point.impedance_imag_ohms == null
+    ) {
+      return [];
+    }
+    return [{
+      frequencyMhz: point.frequency_mhz,
+      resistanceOhms: point.impedance_real_ohms,
+      reactanceOhms: point.impedance_imag_ohms,
+      s11Db: point.s11_db,
+    }];
+  });
+  return identifyResonance(samples);
 }
 
 export function toNECFrequencyResults(result: FEMSimulationResult): FrequencyResult[] {

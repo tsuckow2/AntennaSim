@@ -5,7 +5,13 @@
  * - R (resistance) as solid blue line, X (reactance) as solid orange line
  * - 50-ohm reference line (dashed gray with label)
  * - Zero-reactance reference line
- * - Resonance markers where X crosses zero (jX = 0)
+ * - Reactance-crossing markers, classified by direction: a falling
+ *   crossing (X: + to -) is a parallel resonance (green); a rising
+ *   crossing is a series crossing (gray) — the resonance of a
+ *   series-resonant antenna, but on a patch swept above its parallel
+ *   resonance it is only the probe inductance cancelling the capacitive
+ *   tail, and is not labeled a resonance. Each marker shows the
+ *   interpolated R at the crossing.
  * - Crosshair tooltip showing frequency, R, X, and |Z|
  * - Clear legend with color-coded labels
  */
@@ -25,6 +31,7 @@ import {
 import type { FrequencyResult } from "../../api/nec";
 import type { MatchingConfig } from "../../utils/units";
 import { applyMatching, DEFAULT_MATCHING } from "../../utils/units";
+import { findReactanceCrossings } from "../../utils/resonance";
 import { useChartTheme } from "../../hooks/useChartTheme";
 
 interface ImpedanceChartProps {
@@ -75,23 +82,19 @@ export function ImpedanceChart({ data, matching = DEFAULT_MATCHING, heightClass 
     };
   }, [chartData]);
 
-  // Find resonance points where X crosses zero
-  const resonanceFreqs = useMemo(() => {
-    const crossings: number[] = [];
-    for (let i = 0; i < chartData.length - 1; i++) {
-      const x0 = chartData[i]!.x;
-      const x1 = chartData[i + 1]!.x;
-      // Sign change indicates zero crossing
-      if ((x0 >= 0 && x1 < 0) || (x0 < 0 && x1 >= 0)) {
-        // Linear interpolation to find exact crossing frequency
-        const f0 = chartData[i]!.freq;
-        const f1 = chartData[i + 1]!.freq;
-        const ratio = Math.abs(x0) / (Math.abs(x0) + Math.abs(x1));
-        crossings.push(f0 + ratio * (f1 - f0));
-      }
-    }
-    return crossings;
-  }, [chartData]);
+  // Reactance zero crossings, classified by direction (parallel vs
+  // series) with the interpolated resistance at each crossing.
+  const crossings = useMemo(
+    () =>
+      findReactanceCrossings(
+        chartData.map((d) => ({
+          frequencyMhz: d.freq,
+          resistanceOhms: d.r,
+          reactanceOhms: d.x,
+        })),
+      ),
+    [chartData],
+  );
 
   const ct = useChartTheme();
 
@@ -139,23 +142,28 @@ export function ImpedanceChart({ data, matching = DEFAULT_MATCHING, heightClass 
           {/* Zero reactance reference (resonance line) */}
           <ReferenceLine y={0} stroke={ct.axis} strokeOpacity={0.6} />
 
-          {/* Resonance markers where X crosses zero */}
-          {resonanceFreqs.map((freq, i) => (
-            <ReferenceLine
-              key={`res-${i}`}
-              x={freq}
-              stroke="#10B981"
-              strokeDasharray="3 3"
-              strokeOpacity={0.5}
-              label={{
-                value: `${freq.toFixed(3)}`,
-                position: "top",
-                fill: "#10B981",
-                fontSize: 8,
-                fontFamily: "JetBrains Mono, monospace",
-              }}
-            />
-          ))}
+          {/* Reactance-crossing markers: parallel resonances in green,
+              series crossings in gray, each labeled with its R. */}
+          {crossings.map((crossing, i) => {
+            const parallel = crossing.kind === "parallel";
+            const color = parallel ? "#10B981" : "#9CA3AF";
+            return (
+              <ReferenceLine
+                key={`res-${i}`}
+                x={crossing.frequencyMhz}
+                stroke={color}
+                strokeDasharray="3 3"
+                strokeOpacity={0.5}
+                label={{
+                  value: `${parallel ? "res " : ""}${crossing.frequencyMhz.toFixed(3)} MHz · R ${crossing.resistanceOhms.toFixed(0)}Ω`,
+                  position: "top",
+                  fill: color,
+                  fontSize: 8,
+                  fontFamily: "JetBrains Mono, monospace",
+                }}
+              />
+            );
+          })}
 
           <Tooltip
             contentStyle={{
@@ -224,7 +232,11 @@ export function ImpedanceChart({ data, matching = DEFAULT_MATCHING, heightClass 
         </span>
         <span className="flex items-center gap-1">
           <span className="inline-block w-4 h-0 border-t border-dashed" style={{ borderColor: "#10B981" }} />
-          <span style={{ color: ct.tick }}>Resonance (jX=0)</span>
+          <span style={{ color: ct.tick }}>Parallel resonance (jX=0, falling)</span>
+        </span>
+        <span className="flex items-center gap-1">
+          <span className="inline-block w-4 h-0 border-t border-dashed" style={{ borderColor: "#9CA3AF" }} />
+          <span style={{ color: ct.tick }}>Series crossing (jX=0, rising)</span>
         </span>
       </div>
     </div>

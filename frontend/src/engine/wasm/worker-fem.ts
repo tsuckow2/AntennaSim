@@ -1,5 +1,5 @@
 import { buildFEMMesh, FEM_ATTR_PORT_NEGATIVE, FEM_ATTR_PORT_POSITIVE } from "../mesh";
-import { adaptFEMFrequencyData, buildFEMFrequencies, HCURL_CAPABILITIES, selectFEMPort, type FEMPointStatus, type FEMSimulationRequest, type FEMSimulationResult } from "../fem";
+import { adaptFEMFrequencyData, buildFEMFrequencies, HCURL_CAPABILITIES, identifyFEMResonance, selectFEMPort, type FEMPointStatus, type FEMSimulationRequest, type FEMSimulationResult } from "../fem";
 import { solveFEMPoint, type FEMSolverInput } from "../fem-solver";
 import type { HcurlMtPackage, HcurlSolverModule } from "./hcurl-module";
 import { HCURL_ABI_VERSION, packHcurlPointRequest, unpackHcurlFarFieldBlob, unpackHcurlPointResponse } from "./hcurl-abi";
@@ -409,6 +409,9 @@ async function solve(
     engine = "fem-typescript";
   }
 
+  const frequencyData = adaptFEMFrequencyData(points);
+  const resonance = identifyFEMResonance(frequencyData);
+
   return {
     simulation_id: `hcurl-${Date.now().toString(36)}`,
     engine,
@@ -421,8 +424,8 @@ async function solve(
       warnings: [...mesh.warnings],
     },
     reference_impedance_ohms: request.reference_impedance_ohms,
-    frequency_data: adaptFEMFrequencyData(points),
-    resonant_frequency_mhz: null,
+    frequency_data: frequencyData,
+    resonant_frequency_mhz: resonance?.frequencyMhz ?? null,
     warnings,
     gain_data: gainData,
     capabilities,

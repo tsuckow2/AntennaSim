@@ -81,6 +81,11 @@ pub struct Mesh {
     pub port_positive_facets: Vec<u32>,
     /// Indices into `boundary_facets`.
     pub port_negative_facets: Vec<u32>,
+    /// Coax wave-port descriptor from the request metadata, if any.
+    pub coax_port: Option<crate::abi::CoaxPortRequest>,
+    /// Exclusion AABBs from the request metadata: tets whose centroid
+    /// falls inside any box are inactive (see `is_inactive_tet`).
+    pub exclude_boxes: Vec<[f64; 6]>,
 }
 
 impl Mesh {
@@ -118,6 +123,8 @@ impl Mesh {
             boundary_attributes: req.boundary_attr.clone(),
             port_positive_facets: req.port_pos_facets.clone(),
             port_negative_facets: req.port_neg_facets.clone(),
+            coax_port: req.metadata.coax_port,
+            exclude_boxes: req.metadata.exclude_boxes.clone().unwrap_or_default(),
         })
     }
 
@@ -148,6 +155,29 @@ impl Mesh {
     /// True when tet `t` is a conductor tet (excluded from the domain).
     pub fn is_conductor_tet(&self, t: usize) -> bool {
         self.material_for_region(self.tet_regions[t]).is_conductor()
+    }
+
+    /// True when tet `t` is inactive: a conductor tet, or its centroid
+    /// lies inside one of the metadata exclusion boxes (the stub behind
+    /// a coax port plane).
+    pub fn is_inactive_tet(&self, t: usize) -> bool {
+        if self.is_conductor_tet(t) {
+            return true;
+        }
+        if self.exclude_boxes.is_empty() {
+            return false;
+        }
+        let base = t * 4;
+        let mut c = [0.0f64; 3];
+        for k in 0..4 {
+            let p = self.vertex(self.tetrahedra[base + k]);
+            c[0] += p[0] / 4.0;
+            c[1] += p[1] / 4.0;
+            c[2] += p[2] / 4.0;
+        }
+        self.exclude_boxes.iter().any(|b| {
+            c[0] >= b[0] && c[1] >= b[1] && c[2] >= b[2] && c[0] <= b[3] && c[1] <= b[4] && c[2] <= b[5]
+        })
     }
 
     /// Coordinates of vertex `v`.
@@ -201,6 +231,8 @@ mod tests {
             boundary_attributes: vec![],
             port_positive_facets: vec![],
             port_negative_facets: vec![],
+            coax_port: None,
+            exclude_boxes: vec![],
         };
         let m = mesh.material_for_region(999);
         assert_eq!((m.epsilon_r, m.mu_r), (1.0, 1.0));

@@ -722,6 +722,8 @@ mod tests {
             boundary_attributes: vec![10, 10],
             port_positive_facets: vec![0],
             port_negative_facets: vec![1],
+            coax_port: None,
+            exclude_boxes: vec![],
         }
     }
 
@@ -821,6 +823,8 @@ mod tests {
             boundary_attributes: vec![10, 10, 10, 10],
             port_positive_facets: vec![2, 3],
             port_negative_facets: vec![0, 1],
+            coax_port: None,
+            exclude_boxes: vec![],
         }
     }
 
@@ -911,6 +915,8 @@ mod tests {
             boundary_attributes: vec![10, 10, 10, 10],
             port_positive_facets: vec![2, 3],
             port_negative_facets: vec![0, 1],
+            coax_port: None,
+            exclude_boxes: vec![],
         };
         let sys = build_edge_system(&mesh).unwrap();
         let (pos, neg) = terminals_from_facets(&mesh).unwrap();

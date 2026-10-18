@@ -447,6 +447,8 @@ mod tests {
             boundary_attributes: vec![ATTR_EXTERIOR_ABSORBING],
             port_positive_facets: vec![],
             port_negative_facets: vec![],
+            coax_port: None,
+            exclude_boxes: vec![],
         }
     }
 

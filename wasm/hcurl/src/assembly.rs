@@ -39,6 +39,17 @@ pub fn assemble_hcurl(
 ) -> Result<CsrMatrix> {
     let mut triplets = assemble_volume_triplets(mesh, sys, frequency_hz, budget)?;
     triplets.extend(assemble_abc_triplets(mesh, sys, frequency_hz, budget)?);
+    if let Some(cp) = &mesh.coax_port {
+        let faces = crate::coax::find_port_faces(mesh, sys, cp);
+        triplets.extend(crate::coax::assemble_port_triplets(
+            mesh,
+            sys,
+            cp,
+            &faces,
+            frequency_hz,
+            budget,
+        )?);
+    }
     let n = sys.free_dof_count;
     Ok(CsrMatrix::from_triplets(n, n, triplets))
 }
@@ -132,6 +143,8 @@ mod tests {
             boundary_attributes: vec![],
             port_positive_facets: vec![],
             port_negative_facets: vec![],
+            coax_port: None,
+            exclude_boxes: vec![],
         }
     }
 

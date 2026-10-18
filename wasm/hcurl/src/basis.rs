@@ -157,6 +157,8 @@ mod tests {
             boundary_attributes: vec![],
             port_positive_facets: vec![],
             port_negative_facets: vec![],
+            coax_port: None,
+            exclude_boxes: vec![],
         };
         let geom = tet_geometry(&mesh, 0).unwrap();
         (mesh, geom)

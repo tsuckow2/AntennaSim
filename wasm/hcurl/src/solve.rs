@@ -78,9 +78,33 @@ pub fn solve_point(request: &PointRequest, budget: &Budget) -> Result<PointRespo
     timing.assembly = t0.elapsed_ms();
     let t1 = Stopwatch::start();
 
-    let (positive, negative) = terminals_from_facets(&mesh)?;
-    let feed = select_gap_feed(&mesh, &sys, positive, negative)?;
-    let rhs = build_port_rhs(&mesh, &sys, &feed, frequency_hz)?;
+    let coax = mesh.coax_port;
+    let rhs = if let Some(cp) = &coax {
+        if !(cp.half_pin > 0.0 && cp.half_diel > cp.half_pin && cp.eps_diel >= 1.0) {
+            return Err(Error::InvalidRequest(
+                "coax_port: require half_diel > half_pin > 0 and eps_diel >= 1".to_string(),
+            ));
+        }
+        let faces = crate::coax::find_port_faces(&mesh, &sys, cp);
+        let n_drive = faces.iter().filter(|f| !f.top).count();
+        if n_drive == 0 {
+            return Err(Error::Mesh(
+                "coax_port: no port faces found at z_port (check geometry/exclusions)".to_string(),
+            ));
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        eprintln!(
+            "coax port: {} faces ({} drive, {} absorbing-only)",
+            faces.len(),
+            n_drive,
+            faces.len() - n_drive
+        );
+        crate::coax::build_coax_rhs(&mesh, &sys, cp, &faces, frequency_hz)?
+    } else {
+        let (positive, negative) = terminals_from_facets(&mesh)?;
+        let feed = select_gap_feed(&mesh, &sys, positive, negative)?;
+        build_port_rhs(&mesh, &sys, &feed, frequency_hz)?
+    };
     let kry = bicgstab(
         &matrix,
         &rhs,
@@ -105,8 +129,15 @@ pub fn solve_point(request: &PointRequest, budget: &Budget) -> Result<PointRespo
         ));
     }
 
-    // The impressed current is normalized to exactly 1 A, so Zin = V.
-    let zin = port_voltage(&mesh, &sys, &feed, negative, &kry.x)?;
+    // Legacy path: the impressed current is exactly 1 A, so Zin = V.
+    // Coax path: Zin = V/I at the reference plane from the total fields.
+    let zin = if let Some(cp) = &coax {
+        crate::coax::coax_impedance(&mesh, &sys, cp, &kry.x, frequency_hz)?
+    } else {
+        let (positive, negative) = terminals_from_facets(&mesh)?;
+        let feed = select_gap_feed(&mesh, &sys, positive, negative)?;
+        port_voltage(&mesh, &sys, &feed, negative, &kry.x)?
+    };
     if !zin.re.is_finite() || !zin.im.is_finite() {
         return Ok(failed_point(
             "port impedance is non-finite".to_string(),

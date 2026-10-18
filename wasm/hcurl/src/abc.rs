@@ -28,7 +28,144 @@ fn sorted_triple(u: u32, v: u32, w: u32) -> (u32, u32, u32) {
     (s[0], s[1], s[2])
 }
 
-/// ABC triplets: `(di, dj, j·k0·(area/3)·Σ_q t_q(i)·t_q(j))`.
+/// Tangential-trace mass data for one face of an active tet.
+///
+/// `entries` holds the real facet matrix `B_ij = (area/3)·Σ_q t_i(q)·t_j(q)`
+/// with `t_e(q) = n̂ × N_e` the tangential traces at the 3 facet-edge
+/// midpoints `q` (the 3-point edge-midpoint rule, exact for the quadratic
+/// integrand). `normal` is the OUTWARD unit normal (away from the tet's
+/// opposite vertex); `traces[q][ei*3 + c]` and `dofs[ei]` are indexed by
+/// the facet-edge order of `entries`. Shared by the Silver–Müller ABC
+/// (coefficient `j·k0`) and the coax wave port (`j·k_d`, plus an incident
+/// RHS built from the same traces) — the mass is invariant under
+/// `n̂ → −n̂`, so orienting it outward changes nothing for the ABC.
+pub(crate) struct FacetMass {
+    pub entries: Vec<(usize, usize, f64)>,
+    pub normal: [f64; 3],
+    pub area: f64,
+    pub midpoints: [[f64; 3]; 3],
+    pub traces: [[f64; 9]; 3],
+    pub dofs: [i32; 3],
+}
+
+/// Tangential mass of the face of active tet `ord` opposite local node
+/// `local_facet`. `None` when the face is degenerate.
+pub(crate) fn facet_tangential_mass(
+    mesh: &Mesh,
+    sys: &EdgeSystem,
+    ord: usize,
+    local_facet: usize,
+) -> Result<Option<FacetMass>> {
+    let tet = sys.active_tets[ord] as usize;
+    let geom = tet_geometry(mesh, tet)?;
+    let base = tet * 4;
+    let v = [
+        mesh.tetrahedra[base],
+        mesh.tetrahedra[base + 1],
+        mesh.tetrahedra[base + 2],
+        mesh.tetrahedra[base + 3],
+    ];
+    let local_nodes: Vec<usize> = (0..4).filter(|&k| k != local_facet).collect();
+    let (pu, pv, pw) = (
+        mesh.vertex(v[local_nodes[0]]),
+        mesh.vertex(v[local_nodes[1]]),
+        mesh.vertex(v[local_nodes[2]]),
+    );
+    let opp = mesh.vertex(v[local_facet]);
+    let vu = [pv[0] - pu[0], pv[1] - pu[1], pv[2] - pu[2]];
+    let wu = [pw[0] - pu[0], pw[1] - pu[1], pw[2] - pu[2]];
+    let mut n = [
+        vu[1] * wu[2] - vu[2] * wu[1],
+        vu[2] * wu[0] - vu[0] * wu[2],
+        vu[0] * wu[1] - vu[1] * wu[0],
+    ];
+    let area2 = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+    if !(area2 > 0.0) {
+        return Ok(None);
+    }
+    let area = area2 / 2.0;
+    n = [n[0] / area2, n[1] / area2, n[2] / area2];
+    // Orient outward: away from the tet's opposite vertex.
+    if n[0] * (opp[0] - pu[0]) + n[1] * (opp[1] - pu[1]) + n[2] * (opp[2] - pu[2]) > 0.0 {
+        n = [-n[0], -n[1], -n[2]];
+    }
+
+    let facet_edges: Vec<usize> = (0..6)
+        .filter(|&e| {
+            let [a, b] = TET_EDGES[e];
+            local_nodes.contains(&a) && local_nodes.contains(&b)
+        })
+        .collect();
+    if facet_edges.len() != 3 {
+        return Ok(None);
+    }
+
+    let mut traces = [[0.0f64; 9]; 3];
+    let mut midpoints = [[0.0f64; 3]; 3];
+    let mut dofs = [-1i32; 3];
+    for (ei, &e) in facet_edges.iter().enumerate() {
+        dofs[ei] = sys.dof_of_edge[sys.tet_edges[ord * 6 + e] as usize];
+    }
+    for (qi, &qe) in facet_edges.iter().enumerate() {
+        let [qa, qb] = TET_EDGES[qe];
+        let pa = mesh.vertex(v[qa]);
+        let pb = mesh.vertex(v[qb]);
+        midpoints[qi] = [
+            0.5 * (pa[0] + pb[0]),
+            0.5 * (pa[1] + pb[1]),
+            0.5 * (pa[2] + pb[2]),
+        ];
+        for (ei, &e) in facet_edges.iter().enumerate() {
+            let [a, b] = TET_EDGES[e];
+            let la = if a == qa || a == qb { 0.5 } else { 0.0 };
+            let lb = if b == qa || b == qb { 0.5 } else { 0.0 };
+            let len = edge_length(mesh, tet, e);
+            let f = sys.tet_edge_sign[ord * 6 + e] as f64 * len;
+            let ga = geom.grad_lambda(a);
+            let gb = geom.grad_lambda(b);
+            let nvec = [
+                f * (la * gb[0] - lb * ga[0]),
+                f * (la * gb[1] - lb * ga[1]),
+                f * (la * gb[2] - lb * ga[2]),
+            ];
+            traces[qi][ei * 3] = n[1] * nvec[2] - n[2] * nvec[1];
+            traces[qi][ei * 3 + 1] = n[2] * nvec[0] - n[0] * nvec[2];
+            traces[qi][ei * 3 + 2] = n[0] * nvec[1] - n[1] * nvec[0];
+        }
+    }
+
+    let weight = area / 3.0;
+    let mut entries = Vec::with_capacity(9);
+    for (ii, _) in facet_edges.iter().enumerate() {
+        let di = dofs[ii];
+        if di < 0 {
+            continue;
+        }
+        for (jj, _) in facet_edges.iter().enumerate() {
+            let dj = dofs[jj];
+            if dj < 0 {
+                continue;
+            }
+            let mut dot = 0.0;
+            for q in 0..3 {
+                dot += traces[q][ii * 3] * traces[q][jj * 3]
+                    + traces[q][ii * 3 + 1] * traces[q][jj * 3 + 1]
+                    + traces[q][ii * 3 + 2] * traces[q][jj * 3 + 2];
+            }
+            entries.push((di as usize, dj as usize, weight * dot));
+        }
+    }
+    Ok(Some(FacetMass {
+        entries,
+        normal: n,
+        area,
+        midpoints,
+        traces,
+        dofs,
+    }))
+}
+
+/// ABC triplets: `(di, dj, j·k0·B_ij)` over the absorbing facets.
 pub fn assemble_abc_triplets(
     mesh: &Mesh,
     sys: &EdgeSystem,
@@ -76,88 +213,12 @@ pub fn assemble_abc_triplets(
                 Some(hit) => hit,
                 None => return Ok(chunk),
             };
-            let tet = sys.active_tets[ord] as usize;
-            let geom = tet_geometry(mesh, tet)?;
-
-            // Facet normal from the stored (u,v,w) order; not forced outward.
-            let pu = mesh.vertex(u);
-            let pv = mesh.vertex(v);
-            let pw = mesh.vertex(w);
-            let vu = [pv[0] - pu[0], pv[1] - pu[1], pv[2] - pu[2]];
-            let wu = [pw[0] - pu[0], pw[1] - pu[1], pw[2] - pu[2]];
-            let mut n = [
-                vu[1] * wu[2] - vu[2] * wu[1],
-                vu[2] * wu[0] - vu[0] * wu[2],
-                vu[0] * wu[1] - vu[1] * wu[0],
-            ];
-            let area2 = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
-            if !(area2 > 0.0) {
-                return Ok(chunk);
-            }
-            let area = area2 / 2.0;
-            n[0] /= area2;
-            n[1] /= area2;
-            n[2] /= area2;
-
-            // The 3 local edges lying on the facet, in TET_EDGES order.
-            let local_nodes: Vec<usize> = (0..4).filter(|&k| k != local_facet).collect();
-            let facet_edges: Vec<usize> = (0..6)
-                .filter(|&e| {
-                    let [a, b] = TET_EDGES[e];
-                    local_nodes.contains(&a) && local_nodes.contains(&b)
-                })
-                .collect();
-            if facet_edges.len() != 3 {
-                return Ok(chunk);
-            }
-
-            // Tangential traces t_e(q) = n × N_e at the 3 edge midpoints q.
-            // traces[q][3*ei + k]: q, ei index facet_edges.
-            let mut traces = [[0.0f64; 9]; 3];
-            for (qi, &qe) in facet_edges.iter().enumerate() {
-                let [qa, qb] = TET_EDGES[qe];
-                for (ei, &e) in facet_edges.iter().enumerate() {
-                    let [a, b] = TET_EDGES[e];
-                    let la = if a == qa || a == qb { 0.5 } else { 0.0 };
-                    let lb = if b == qa || b == qb { 0.5 } else { 0.0 };
-                    let len = edge_length(mesh, tet, e);
-                    let f = sys.tet_edge_sign[ord * 6 + e] as f64 * len;
-                    let ga = geom.grad_lambda(a);
-                    let gb = geom.grad_lambda(b);
-                    let nvec = [
-                        f * (la * gb[0] - lb * ga[0]),
-                        f * (la * gb[1] - lb * ga[1]),
-                        f * (la * gb[2] - lb * ga[2]),
-                    ];
-                    traces[qi][ei * 3] = n[1] * nvec[2] - n[2] * nvec[1];
-                    traces[qi][ei * 3 + 1] = n[2] * nvec[0] - n[0] * nvec[2];
-                    traces[qi][ei * 3 + 2] = n[0] * nvec[1] - n[1] * nvec[0];
-                }
-            }
-
-            let weight = area / 3.0;
-            for (ii, &ei) in facet_edges.iter().enumerate() {
-                let di = sys.dof_of_edge[sys.tet_edges[ord * 6 + ei] as usize];
-                if di < 0 {
-                    continue;
-                }
-                for (jj, &ej) in facet_edges.iter().enumerate() {
-                    let dj = sys.dof_of_edge[sys.tet_edges[ord * 6 + ej] as usize];
-                    if dj < 0 {
-                        continue;
-                    }
-                    let mut dot = 0.0;
-                    for q in 0..3 {
-                        dot += traces[q][ii * 3] * traces[q][jj * 3]
-                            + traces[q][ii * 3 + 1] * traces[q][jj * 3 + 1]
-                            + traces[q][ii * 3 + 2] * traces[q][jj * 3 + 2];
-                    }
-                    chunk.push((
-                        di as usize,
-                        dj as usize,
-                        Complex64::new(0.0, k0 * weight * dot),
-                    ));
-                }
+            let mass = match facet_tangential_mass(mesh, sys, ord, local_facet)? {
+                Some(m) => m,
+                None => return Ok(chunk),
+            };
+            for (di, dj, bij) in mass.entries {
+                chunk.push((di, dj, Complex64::new(0.0, k0 * bij)));
             }
             Ok(chunk)
         });
@@ -185,6 +246,8 @@ mod tests {
             boundary_attributes: vec![ATTR_EXTERIOR_ABSORBING],
             port_positive_facets: vec![],
             port_negative_facets: vec![],
+            coax_port: None,
+            exclude_boxes: vec![],
         }
     }
 

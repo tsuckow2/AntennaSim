@@ -50,7 +50,7 @@ pub fn build_edge_system(mesh: &Mesh) -> Result<EdgeSystem> {
     let mut active_tets = Vec::new();
     let mut conductor_tet_count = 0usize;
     for t in 0..tet_count {
-        if mesh.is_conductor_tet(t) {
+        if mesh.is_inactive_tet(t) {
             conductor_tet_count += 1;
         } else {
             active_tets.push(t as u32);
@@ -165,6 +165,8 @@ mod tests {
             boundary_attributes: vec![crate::abi::ATTR_EXTERIOR_ABSORBING],
             port_positive_facets: vec![0],
             port_negative_facets: vec![0],
+            coax_port: None,
+            exclude_boxes: vec![],
         }
     }
 

@@ -68,6 +68,7 @@ pub mod assembly;
 pub mod basis;
 pub mod budget;
 pub mod clock;
+pub mod coax;
 pub mod constants;
 pub mod csr;
 pub mod edge;

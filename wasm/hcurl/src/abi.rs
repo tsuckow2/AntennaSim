@@ -120,6 +120,35 @@ pub struct FarFieldRequest {
     pub phi_step_deg: Option<f64>,
 }
 
+/// Coaxial wave-port request, nested under the `coax_port` metadata key.
+///
+/// When present, the driven solve replaces the lumped gap feed with a
+/// physical coax section: the port plane `z_port` (inside the mesh, its
+/// behind-plane stub removed via `exclude_boxes`) carries a TEM absorbing
+/// condition plus an incident-wave drive, and the input impedance is
+/// extracted as V/I at the reference plane `z_ref`. All cross-sections are
+/// squares centered on `center` (the Cartesian mesher's native shape, and
+/// the existing Snyder pin is already a 1.3 mm square).
+#[derive(Debug, Clone, Copy, Default, Deserialize)]
+pub struct CoaxPortRequest {
+    /// Coax axis position `[x, y]` in meters.
+    pub center: [f64; 2],
+    /// Port plane z (drive + absorbing condition).
+    pub z_port: f64,
+    /// Reference plane z for the V/I extraction (inside the dielectric).
+    pub z_ref: f64,
+    /// Inner conductor half-width (square) in meters.
+    pub half_pin: f64,
+    /// Dielectric outer half-width (square) in meters.
+    pub half_diel: f64,
+    /// Dielectric relative permittivity (TEM wave impedance η0/√εr).
+    pub eps_diel: f64,
+    /// Optional second absorbing-only plane (calibration fixtures:
+    /// a matched termination at the far end of a coax section).
+    #[serde(default)]
+    pub z_port_top: Option<f64>,
+}
+
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct RequestMetadata {
     #[serde(default)]
@@ -128,6 +157,14 @@ pub struct RequestMetadata {
     pub krylov_tolerance: Option<f64>,
     #[serde(default)]
     pub far_field: Option<FarFieldRequest>,
+    #[serde(default)]
+    pub coax_port: Option<CoaxPortRequest>,
+    /// Axis-aligned boxes `[minx, miny, minz, maxx, maxy, maxz]` (meters);
+    /// tets whose centroid falls inside any box are excluded from the
+    /// active domain (like conductor tets). Used to remove the stub
+    /// behind a coax port plane so the plane is a true boundary.
+    #[serde(default)]
+    pub exclude_boxes: Option<Vec<[f64; 6]>>,
     /// Informational only; typed as `Value` because packers emit versions
     /// as either numbers or strings.
     #[serde(default)]

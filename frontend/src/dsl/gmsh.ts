@@ -1,5 +1,5 @@
 import type { BoxEntity, ModelIR, SheetRectEntity, Vec3 } from "./model-ir";
-import { validateModelIR } from "./model-ir";
+import { resolveCoaxPort, validateModelIR } from "./model-ir";
 
 export interface GmshDiagnostic {
   path: string;
@@ -107,13 +107,24 @@ export function exportModelIRToGmsh(ir: ModelIR): GmshExport {
   });
 
   ir.ports.forEach((port, index) => {
+    // A coax port exports its nominal terminals: pin top / port plane.
+    let positive: Vec3;
+    let negative: Vec3;
+    if (port.kind === "coaxPort") {
+      const spec = resolveCoaxPort(port);
+      positive = [spec.center[0], spec.center[1], spec.pinTopZ];
+      negative = [spec.center[0], spec.center[1], spec.portZ];
+    } else {
+      positive = port.positive;
+      negative = port.negative;
+    }
     const positiveTag = tag++;
     const negativeTag = tag++;
-    lines.push(`Point(${positiveTag}) = {${point(port.positive)}, 0.001};`);
-    lines.push(`Point(${negativeTag}) = {${point(port.negative)}, 0.001};`);
+    lines.push(`Point(${positiveTag}) = {${point(positive)}, 0.001};`);
+    lines.push(`Point(${negativeTag}) = {${point(negative)}, 0.001};`);
     lines.push(`Physical Point(${quote(`${port.id}_positive`)}) = {${positiveTag}};`);
     lines.push(`Physical Point(${quote(`${port.id}_negative`)}) = {${negativeTag}};`);
-    if (port.positive.every((value, coordinate) => value === port.negative[coordinate])) {
+    if (positive.every((value, coordinate) => value === negative[coordinate])) {
       diagnostics.push(diagnostic(`ports[${index}]`, "positive and negative terminals must be distinct"));
     }
   });

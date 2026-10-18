@@ -1,10 +1,16 @@
-import type { Boundary, GeometryEntity, LumpedPort, Material, MeshHint, ModelIR, Vec3 } from "./model-ir";
+import type { Boundary, CoaxPort, GeometryEntity, LumpedPort, Material, MeshHint, ModelIR, Vec3 } from "./model-ir";
 
 export interface GeometryApi {
   material(name: string, spec: Omit<Material, "name">): Material;
   box(id: string, options: { center: Vec3; size: Vec3; material: string }): void;
   sheetRect(id: string, options: { center: Vec3; size: [number, number]; normal?: Vec3; material: string }): void;
   lumpedPort(id: string, options: { positive: Vec3; negative: Vec3; impedance_ohms?: number }): void;
+  /**
+   * Coaxial wave-port feed (see CoaxPort in model-ir): the mesher
+   * injects the pin/dielectric/frame geometry and holes the feed
+   * column out of the substrate and ground, so author those whole.
+   */
+  coaxPort(id: string, options: Omit<CoaxPort, "id" | "kind" | "impedance_ohms"> & { impedance_ohms?: number }): void;
   airbox(options: { padding_m: number }): void;
   pml(options: { padding_m: number; layers?: number }): void;
   refine(options: MeshHint): void;
@@ -40,6 +46,10 @@ export function createGeometryApi(paramSchemaVersion: 1): { api: GeometryApi; ir
       requireNewId(id);
       ir.ports.push({ id, kind: "lumpedPort", impedance_ohms: 50, ...options });
     },
+    coaxPort(id, options) {
+      requireNewId(id);
+      ir.ports.push({ id, kind: "coaxPort", impedance_ohms: 50, ...options });
+    },
     airbox(options) { ir.boundaries.push({ kind: "radiation", ...options }); },
     pml(options) { ir.boundaries.push({ kind: "pml", layers: 8, ...options }); },
     refine(options) { ir.meshHints.push(options); },
@@ -47,4 +57,4 @@ export function createGeometryApi(paramSchemaVersion: 1): { api: GeometryApi; ir
   return { api, ir };
 }
 
-export type { Boundary, GeometryEntity, LumpedPort };
+export type { Boundary, CoaxPort, GeometryEntity, LumpedPort };

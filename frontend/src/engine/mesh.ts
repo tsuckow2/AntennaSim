@@ -1,5 +1,5 @@
-import type { BoxEntity, Material, ModelIR, SheetRectEntity, Vec3 } from "../dsl/model-ir";
-import { validateModelIR } from "../dsl/model-ir";
+import type { BoxEntity, CoaxPort, Material, MeshHint, ModelIR, ResolvedCoaxPort, SheetRectEntity, Vec3 } from "../dsl/model-ir";
+import { resolveCoaxPort, validateModelIR } from "../dsl/model-ir";
 
 /**
  * Conforming tetrahedral mesh pipeline for the M4 volume FEM path.
@@ -183,6 +183,98 @@ function sheetFromEntity(entity: SheetRectEntity, material: Material): MeshedShe
   return { id: entity.id, axis, plane, uAxis, uMin, uMax, vAxis, vMin, vMax };
 }
 
+/**
+ * Hole a vertical square column (half-width `half` around `(cx, cy)`,
+ * z in `[zLo, zHi]`) out of a box: the box is z-sliced at the column's
+ * z range and the in-range slab is split into the four side boxes
+ * around the column footprint — the decomposition the validated coax
+ * generator models author by hand. Split products keep the parent id
+ * (and attribute/material), so mesh hints on the parent still apply.
+ * Throws when the column only partially crosses the slab's footprint:
+ * that split is not a clean four-box decomposition.
+ */
+function holeOutBox(box: MeshedBox, half: number, cx: number, cy: number, zLo: number, zHi: number, portId: string): MeshedBox[] {
+  // Split planes are snapped like every other box face: the injected
+  // feed boxes pass through boxFromEntity (snapped), and an unsnapped
+  // split plane can sit one ULP inside an injected face, which the
+  // strict overlap check reads as a volume overlap.
+  const fx0 = snap(cx - half);
+  const fx1 = snap(cx + half);
+  const fy0 = snap(cy - half);
+  const fy1 = snap(cy + half);
+  zLo = snap(zLo);
+  zHi = snap(zHi);
+  const bx0 = box.min[0]!;
+  const by0 = box.min[1]!;
+  const bz0 = box.min[2]!;
+  const bx1 = box.max[0]!;
+  const by1 = box.max[1]!;
+  const bz1 = box.max[2]!;
+  if (bx1 <= fx0 || bx0 >= fx1 || by1 <= fy0 || by0 >= fy1 || bz1 <= zLo || bz0 >= zHi) return [box];
+  const out: MeshedBox[] = [];
+  if (bz0 < zLo) out.push({ ...box, max: [bx1, by1, zLo] });
+  if (bz1 > zHi) out.push({ ...box, min: [bx0, by0, zHi] });
+  const mz0 = Math.max(bz0, zLo);
+  const mz1 = Math.min(bz1, zHi);
+  if (mz1 > mz0) {
+    if (fx0 <= bx0 && fx1 >= bx1 && fy0 <= by0 && fy1 >= by1) {
+      // The column consumes the slab's whole cross-section.
+    } else if (fx0 > bx0 && fx1 < bx1 && fy0 > by0 && fy1 < by1) {
+      const slab: MeshedBox = { ...box, min: [bx0, by0, mz0], max: [bx1, by1, mz1] };
+      out.push(
+        { ...slab, max: [fx0, by1, mz1] },
+        { ...slab, min: [fx1, by0, mz0] },
+        { ...slab, min: [fx0, by0, mz0], max: [fx1, fy0, mz1] },
+        { ...slab, min: [fx0, fy1, mz0], max: [fx1, by1, mz1] },
+      );
+    } else {
+      throw new Error(
+        `coax port ${portId}: box ${box.id} partially overlaps the feed column; ` +
+          "author it split around the feed, or move the feed fully inside it",
+      );
+    }
+  }
+  return out;
+}
+
+/**
+ * Clip a ground-plane sheet (z-normal, at the coax ground plane) around
+ * the coax frame footprint: a continuous sheet there would bridge the
+ * dielectric annulus and short the coax at the ground plane. Same
+ * four-piece decomposition and partial-overlap rule as `holeOutBox`.
+ */
+function clipGroundSheet(sheet: MeshedSheet, coax: ResolvedCoaxPort, portId: string): MeshedSheet[] {
+  if (sheet.axis !== 2) return [sheet];
+  if (Math.abs(sheet.plane - coax.groundZ) > 1e-9) return [sheet];
+  const xRange: [number, number] = sheet.uAxis === 0 ? [sheet.uMin, sheet.uMax] : [sheet.vMin, sheet.vMax];
+  const yRange: [number, number] = sheet.uAxis === 1 ? [sheet.uMin, sheet.uMax] : [sheet.vMin, sheet.vMax];
+  const fx0 = snap(coax.center[0] - coax.halfFrame);
+  const fx1 = snap(coax.center[0] + coax.halfFrame);
+  const fy0 = snap(coax.center[1] - coax.halfFrame);
+  const fy1 = snap(coax.center[1] + coax.halfFrame);
+  const [x0, x1] = xRange;
+  const [y0, y1] = yRange;
+  if (x1 <= fx0 || x0 >= fx1 || y1 <= fy0 || y0 >= fy1) return [sheet];
+  if (fx0 <= x0 && fx1 >= x1 && fy0 <= y0 && fy1 >= y1) return []; // fully consumed by the frame footprint
+  if (!(fx0 > x0 && fx1 < x1 && fy0 > y0 && fy1 < y1)) {
+    throw new Error(
+      `coax port ${portId}: ground sheet ${sheet.id} partially overlaps the coax frame footprint; ` +
+        "author it split around the feed, or move the feed fully inside it",
+    );
+  }
+  const piece = (xr: [number, number], yr: [number, number]): MeshedSheet => {
+    const uRange = sheet.uAxis === 0 ? xr : yr;
+    const vRange = sheet.uAxis === 0 ? yr : xr;
+    return { ...sheet, uMin: uRange[0], uMax: uRange[1], vMin: vRange[0], vMax: vRange[1] };
+  };
+  return [
+    piece([x0, fx0], [y0, y1]),
+    piece([fx1, x1], [y0, y1]),
+    piece([fx0, fx1], [y0, fy0]),
+    piece([fx0, fx1], [fy1, y1]),
+  ];
+}
+
 function buildMaterialTable(entries: FEMMeshMaterialEntry[]): Uint8Array {
   const buffer = new Uint8Array(entries.length * 40);
   const view = new DataView(buffer.buffer);
@@ -244,8 +336,11 @@ function pointTriangleDistanceSq(p: Vec3, a: Vec3, b: Vec3, c: Vec3): number {
  *
  * @param ir validated parametric model IR (box entities only)
  * @param meshSizeM target maximum cell edge length in metres
- * @param port optional lumped port; when given, its terminal facet sets are
- *             resolved per contract C, otherwise the port sets stay empty
+ * @param port optional port; for a lumped port its terminal facet sets are
+ *             resolved per contract C, and for a coaxPort the feed geometry
+ *             is injected (see the coax block below) with dummy facet sets
+ *             selected geometrically at the port plane. When omitted, the
+ *             port sets stay empty.
  */
 export function buildFEMMesh(ir: ModelIR, meshSizeM: number, port?: FEMPortTerminals): FEMMeshArtifact {
   const diagnostics = validateModelIR(ir);
@@ -262,16 +357,91 @@ export function buildFEMMesh(ir: ModelIR, meshSizeM: number, port?: FEMPortTermi
   const materialByName = new Map(ir.materials.map((material) => [material.name, material]));
   const sortedNames = [...materialByName.keys()].sort();
   const attributeByMaterial = new Map(sortedNames.map((name, index) => [name, FEM_REGION_MATERIAL_BASE + index]));
-  const boxes: MeshedBox[] = entities.map((entity) => {
+  let boxes: MeshedBox[] = entities.map((entity) => {
     const material = materialByName.get(entity.material);
     if (!material) throw new Error(`Unknown material for box ${entity.id}: ${entity.material}`);
     return boxFromEntity(entity, attributeByMaterial.get(entity.material)!, material);
   });
-  const sheets: MeshedSheet[] = sheetEntities.map((entity) => {
+  let sheets: MeshedSheet[] = sheetEntities.map((entity) => {
     const material = materialByName.get(entity.material);
     if (!material) throw new Error(`Unknown material for sheetRect ${entity.id}: ${entity.material}`);
     return sheetFromEntity(entity, material);
   });
+  let effectiveHints: MeshHint[] = ir.meshHints;
+
+  // Coax wave-port feed geometry, when the selected port is a coaxPort:
+  // hole the feed column out of the user boxes (frame footprint below
+  // the ground plane, pin footprint above it), clip ground-plane sheets
+  // around the frame, and inject the pin / dielectric / frame boxes
+  // with the fine mesh hints of the validated generator models. The
+  // model itself is authored whole (substrate, ground, patch).
+  const coaxIrPort = port
+    ? ir.ports.find((candidate): candidate is CoaxPort => candidate.kind === "coaxPort" && candidate.id === port.id)
+    : undefined;
+  let coax: ResolvedCoaxPort | undefined;
+  if (coaxIrPort && port) {
+    coax = resolveCoaxPort(coaxIrPort);
+    const spec = coax;
+    const conductor = materialByName.get(spec.conductorMaterial);
+    if (!conductor) throw new Error(`Coax port ${coaxIrPort.id}: unknown conductor material "${spec.conductorMaterial}"`);
+    const dielectric = materialByName.get(spec.dielectricMaterial);
+    if (!dielectric) throw new Error(`Coax port ${coaxIrPort.id}: unknown dielectric material "${spec.dielectricMaterial}"`);
+    const [cx, cy] = spec.center;
+    boxes = boxes
+      .flatMap((box) => holeOutBox(box, spec.halfFrame, cx, cy, spec.portZ, spec.groundZ, coaxIrPort.id))
+      .flatMap((box) => holeOutBox(box, spec.halfPin, cx, cy, spec.groundZ, spec.pinTopZ, coaxIrPort.id));
+    sheets = sheets.flatMap((sheet) => clipGroundSheet(sheet, spec, coaxIrPort.id));
+    const injectedBox = (id: string, center: Vec3, size: Vec3, materialName: string): MeshedBox => {
+      const material = materialByName.get(materialName)!;
+      return boxFromEntity(
+        { id, kind: "box", center, size, material: materialName },
+        attributeByMaterial.get(materialName)!,
+        material,
+      );
+    };
+    const splitAround = (
+      prefix: string,
+      innerHalf: number,
+      outerHalf: number,
+      zCenter: number,
+      zSize: number,
+      materialName: string,
+    ): MeshedBox[] => {
+      const mid = (innerHalf + outerHalf) / 2;
+      return [
+        injectedBox(`${prefix}_l`, [cx - mid, cy, zCenter], [outerHalf - innerHalf, outerHalf * 2, zSize], materialName),
+        injectedBox(`${prefix}_r`, [cx + mid, cy, zCenter], [outerHalf - innerHalf, outerHalf * 2, zSize], materialName),
+        injectedBox(`${prefix}_f`, [cx, cy - mid, zCenter], [innerHalf * 2, outerHalf - innerHalf, zSize], materialName),
+        injectedBox(`${prefix}_b`, [cx, cy + mid, zCenter], [innerHalf * 2, outerHalf - innerHalf, zSize], materialName),
+      ];
+    };
+    const pinId = `${coaxIrPort.id}_coax_pin`;
+    const ptfePrefix = `${coaxIrPort.id}_coax_ptfe`;
+    const framePrefix = `${coaxIrPort.id}_coax_frame`;
+    for (const id of [pinId, ...["l", "r", "f", "b"].flatMap((s) => [`${ptfePrefix}_${s}`, `${framePrefix}_${s}`])]) {
+      if (ir.entities.some((entity) => entity.id === id)) {
+        throw new Error(`Coax port ${coaxIrPort.id}: entity id ${id} is reserved for the injected feed geometry`);
+      }
+    }
+    const sectionZ = (spec.portZ + spec.groundZ) / 2;
+    const sectionH = spec.groundZ - spec.portZ;
+    boxes.push(
+      injectedBox(pinId, [cx, cy, (spec.portZ + spec.pinTopZ) / 2], [spec.halfPin * 2, spec.halfPin * 2, spec.pinTopZ - spec.portZ], spec.conductorMaterial),
+      ...splitAround(ptfePrefix, spec.halfPin, spec.halfDiel, sectionZ, sectionH, spec.dielectricMaterial),
+      ...splitAround(framePrefix, spec.halfDiel, spec.halfFrame, sectionZ, sectionH, spec.conductorMaterial),
+    );
+    const fine = { x: 0.0005, y: 0.0005, z: 0.001 };
+    effectiveHints = [
+      ...ir.meshHints,
+      { region: pinId, max_size_m: meshSizeM, max_size_by_axis_m: fine },
+      ...["l", "r", "f", "b"].map((s) => ({ region: `${ptfePrefix}_${s}`, max_size_m: meshSizeM, max_size_by_axis_m: fine })),
+      ...["l", "r", "f", "b"].map((s) => ({
+        region: `${framePrefix}_${s}`,
+        max_size_m: meshSizeM,
+        max_size_by_axis_m: { x: 0.001, y: 0.001, z: 0.0015 },
+      })),
+    ];
+  }
 
   for (let left = 0; left < boxes.length; left += 1) {
     for (let right = left + 1; right < boxes.length; right += 1) {
@@ -328,7 +498,7 @@ export function buildFEMMesh(ir: ModelIR, meshSizeM: number, port?: FEMPortTermi
   // no interval exceeds the requested size (or an applicable mesh hint).
   // Zero-thickness sheets contribute their normal plane plus their in-plane
   // footprint boundaries, so sheet facets align exactly with the footprint.
-  const hintByRegion = new Map(ir.meshHints.map((hint) => [hint.region, hint]));
+  const hintByRegion = new Map(effectiveHints.map((hint) => [hint.region, hint]));
   const axisName = ["x", "y", "z"] as const;
   const planes: number[][] = [[], [], []];
   for (let axis = 0 as 0 | 1 | 2; axis < 3; axis += 1) {
@@ -576,7 +746,35 @@ export function buildFEMMesh(ir: ModelIR, meshSizeM: number, port?: FEMPortTermi
   // Port terminal -> facet-set mapping per contract C.
   let portPositiveFacets = new Uint32Array();
   let portNegativeFacets = new Uint32Array();
-  if (port) {
+  if (port && coax) {
+    // Coax wave port: the native solver drives the port geometrically
+    // and never reads these sets, but the ABI requires them non-empty.
+    // Mirror the generator's dummy selection: pin-cross-section facets
+    // at the port plane are "positive", frame-annulus facets "negative".
+    const pos: number[] = [];
+    const neg: number[] = [];
+    const facetCount = boundaryFacets.length / 3;
+    for (let f = 0; f < facetCount; f += 1) {
+      let cz = 0;
+      let cxm = 0;
+      let cym = 0;
+      for (let k = 0; k < 3; k += 1) {
+        const c = vertexCoord(boundaryFacets[f * 3 + k]!);
+        cxm += c[0] / 3;
+        cym += c[1] / 3;
+        cz += c[2] / 3;
+      }
+      if (Math.abs(cz - coax.portZ) > 1e-9) continue;
+      const cheb = Math.max(Math.abs(cxm - coax.center[0]), Math.abs(cym - coax.center[1]));
+      if (cheb <= coax.halfPin + 1e-9) pos.push(f);
+      else if (cheb >= coax.halfDiel - 1e-9 && cheb <= coax.halfFrame + 1e-9) neg.push(f);
+    }
+    if (pos.length === 0 || neg.length === 0) {
+      throw new Error(`coax port ${port.id}: port-plane facet selection failed (${pos.length} positive, ${neg.length} negative)`);
+    }
+    portPositiveFacets = new Uint32Array(pos);
+    portNegativeFacets = new Uint32Array(neg);
+  } else if (port) {
     // The port gap bounds the terminal tolerance: a terminal may legitimately
     // sit within one port length of the opposite terminal's conductor face
     // (e.g. a 1 mm probe feed over a ground plane), so the tolerance must be

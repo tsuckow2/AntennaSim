@@ -413,6 +413,7 @@ describe("FEM H(curl) solver", () => {
     const exec = await executeParametricScript(script);
     expect(exec.diagnostics).toHaveLength(0);
     const port = exec.ir!.ports[0]!;
+    if (port.kind !== "lumpedPort") throw new Error("the 908 MHz example must use a lumped port");
     const mesh = buildFEMMesh(exec.ir!, 0.015, {
       id: port.id as string,
       positive: port.positive as Vec3,

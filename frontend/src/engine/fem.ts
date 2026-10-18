@@ -1,8 +1,10 @@
 import type { ModelIR } from "../dsl/model-ir";
-import { validateModelIR } from "../dsl/model-ir";
+import { resolveCoaxPort, validateModelIR } from "../dsl/model-ir";
 import type { FEMMeshArtifact } from "./mesh";
 import type { FrequencyResult } from "../api/nec";
 import { identifyResonance, type ReactanceCrossing } from "../utils/resonance";
+import type { CoaxPortSpec } from "./fem-coax";
+import type { ExcludeBox } from "./fem-solver";
 
 export type FEMPointStatus = "ok" | "non_finite" | "solver_error" | "cancelled" | "timeout";
 
@@ -384,6 +386,92 @@ export function selectFEMPort(request: FEMSimulationRequest): { positive: [numbe
     throw new Error(`Invalid ModelIR: ${first.path} ${first.message}`);
   }
   const port = request.model_ir.ports.find((candidate) => !request.port_id || candidate.id === request.port_id);
-  if (!port) throw new Error(`Unknown lumped port: ${request.port_id ?? "first port"}`);
+  if (!port) throw new Error(`Unknown port: ${request.port_id ?? "first port"}`);
+  if (port.kind === "coaxPort") {
+    // Nominal terminals for mesh/facet bookkeeping: the pin top (where
+    // the feed meets the antenna) and the port plane. The actual drive
+    // is the wave port — see buildFEMCoaxRunConfig.
+    const spec = resolveCoaxPort(port);
+    return {
+      id: port.id,
+      positive: [spec.center[0], spec.center[1], spec.pinTopZ],
+      negative: [spec.center[0], spec.center[1], spec.portZ],
+    };
+  }
   return port;
+}
+
+/**
+ * Everything a solver needs to run the selected port as a coax wave
+ * port, or null when the selected port is a lumped port: the native
+ * request metadata fragment (`coax_port` + `exclude_boxes`, the exact
+ * shape the hcurl ABI parses) and the TypeScript fallback's solver
+ * input fragment. The exclusion box removes the air stub behind the
+ * port plane (out to the domain wall) so the plane is a true boundary.
+ */
+export interface FEMCoaxRunConfig {
+  metadata: {
+    coax_port: {
+      center: [number, number];
+      z_port: number;
+      z_ref: number;
+      half_pin: number;
+      half_diel: number;
+      eps_diel: number;
+    };
+    exclude_boxes: [number, number, number, number, number, number][];
+  };
+  solver: {
+    coaxPort: CoaxPortSpec;
+    excludeBoxes: ExcludeBox[];
+  };
+}
+
+export function buildFEMCoaxRunConfig(request: FEMSimulationRequest): FEMCoaxRunConfig | null {
+  const port = request.model_ir.ports.find((candidate) => !request.port_id || candidate.id === request.port_id);
+  if (!port || port.kind !== "coaxPort") return null;
+  const spec = resolveCoaxPort(port);
+  const dielectric = request.model_ir.materials.find((material) => material.name === spec.dielectricMaterial);
+  if (!dielectric) {
+    throw new Error(`Coax port ${port.id}: unknown dielectric material "${spec.dielectricMaterial}"`);
+  }
+  const padding = request.model_ir.boundaries.length > 0
+    ? Math.max(...request.model_ir.boundaries.map((boundary) => boundary.padding_m))
+    : 0;
+  const [cx, cy] = spec.center;
+  // Same box the validated generator models use: from just past the
+  // padded domain extent (groundZ - padding - 2 mm) up to the port
+  // plane, which covers every stub tet adjacent to the plane.
+  const excludeBox: ExcludeBox = [
+    cx - spec.halfFrame,
+    cy - spec.halfFrame,
+    spec.groundZ - padding - 0.002,
+    cx + spec.halfFrame,
+    cy + spec.halfFrame,
+    spec.portZ,
+  ];
+  return {
+    metadata: {
+      coax_port: {
+        center: [cx, cy],
+        z_port: spec.portZ,
+        z_ref: spec.refZ,
+        half_pin: spec.halfPin,
+        half_diel: spec.halfDiel,
+        eps_diel: dielectric.epsilon_r,
+      },
+      exclude_boxes: [[...excludeBox]],
+    },
+    solver: {
+      coaxPort: {
+        center: [cx, cy],
+        zPort: spec.portZ,
+        zRef: spec.refZ,
+        halfPin: spec.halfPin,
+        halfDiel: spec.halfDiel,
+        epsDiel: dielectric.epsilon_r,
+      },
+      excludeBoxes: [excludeBox],
+    },
+  };
 }

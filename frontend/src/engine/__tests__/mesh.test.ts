@@ -124,9 +124,52 @@ describe("FEM mesh pipeline", () => {
     }
   });
 
+  it("injects coax feed geometry for a coaxPort and holes the feed column", () => {
+    const ir: ModelIR = {
+      version: 1,
+      paramSchemaVersion: 1,
+      materials: [
+        { name: "copper", epsilon_r: 1, mu_r: 1, conductivity_s_m: 5.8e7 },
+        { name: "fr4", epsilon_r: 4.4, mu_r: 1 },
+        { name: "ptfe", epsilon_r: 2.1, mu_r: 1 },
+      ],
+      entities: [
+        { id: "substrate", kind: "box", center: [0, 0, 0.0005], size: [0.02, 0.02, 0.001], material: "fr4" },
+      ],
+      ports: [
+        { id: "feed", kind: "coaxPort", center: [0, 0], ground_z_m: 0, pin_top_z_m: 0.001, impedance_ohms: 50 },
+      ],
+      boundaries: [{ kind: "radiation", padding_m: 0.01 }],
+      meshHints: [],
+    };
+    const terminals = { id: "feed", positive: [0, 0, 0.001] as [number, number, number], negative: [0, 0, -0.006] as [number, number, number] };
+    const mesh = buildFEMMesh(ir, 0.005, terminals);
+    // Dummy ABI facet sets are selected geometrically at the port plane.
+    expect(mesh.portPositiveFacets.length).toBeGreaterThan(0);
+    expect(mesh.portNegativeFacets.length).toBeGreaterThan(0);
+    // The injected PTFE annulus is meshed with its own region.
+    const ptfe = mesh.materials.find((m) => m.name === "ptfe")!;
+    expect([...mesh.tetRegions].some((region) => region === ptfe.attribute)).toBe(true);
+    // A feed whose frame footprint crosses the edge of a box in the
+    // frame's z-band (here a thick ground box below the ground plane)
+    // cannot be holed cleanly and is rejected with guidance. (The
+    // substrate only ever sees the pin footprint, which stays inside.)
+    const edgeIR: ModelIR = {
+      ...ir,
+      entities: [
+        ...ir.entities,
+        { id: "ground", kind: "box", center: [0, 0, -0.002], size: [0.02, 0.02, 0.004], material: "copper" },
+      ],
+      ports: [{ id: "feed", kind: "coaxPort", center: [0.009, 0], ground_z_m: 0, pin_top_z_m: 0.001, impedance_ohms: 50 }],
+    };
+    expect(() => buildFEMMesh(edgeIR, 0.005, terminals)).toThrow(/partially overlaps the feed column/);
+  });
+
   it("maps lumped-port terminals to conductor-air facet sets", () => {
     const ir = patchIR();
-    const mesh = buildFEMMesh(ir, 0.005, ir.ports[0]);
+    const port = ir.ports[0]!;
+    if (port.kind !== "lumpedPort") throw new Error("patchIR must use a lumped port");
+    const mesh = buildFEMMesh(ir, 0.005, port);
     expect(mesh.portPositiveFacets.length).toBe(2);
     expect(mesh.portNegativeFacets.length).toBe(2);
     const positive = new Set(mesh.portPositiveFacets);
@@ -209,14 +252,18 @@ describe("FEM mesh pipeline", () => {
   it("reports invalid_port_no_contact for a terminal floating in air", () => {
     const ir = patchIR();
     // In the air region, further than tol from every mesh surface.
-    const port = { ...ir.ports[0]!, positive: [0.015, 0, 0.005] as [number, number, number] };
+    const base = ir.ports[0]!;
+    if (base.kind !== "lumpedPort") throw new Error("patchIR must use a lumped port");
+    const port = { ...base, positive: [0.015, 0, 0.005] as [number, number, number] };
     expect(() => buildFEMMesh(ir, 0.005, port)).toThrow(/invalid_port_no_contact/);
   });
 
   it("reports invalid_port_material_contact for a terminal on a dielectric surface", () => {
     const ir = patchIR();
     // On top of the FR4 substrate, clear of the copper patch.
-    const port = { ...ir.ports[0]!, positive: [0.008, 0, 0.001] as [number, number, number] };
+    const base = ir.ports[0]!;
+    if (base.kind !== "lumpedPort") throw new Error("patchIR must use a lumped port");
+    const port = { ...base, positive: [0.008, 0, 0.001] as [number, number, number] };
     expect(() => buildFEMMesh(ir, 0.005, port)).toThrow(/invalid_port_material_contact/);
   });
 

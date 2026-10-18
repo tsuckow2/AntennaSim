@@ -1,5 +1,5 @@
 import { buildFEMMesh, FEM_ATTR_PORT_NEGATIVE, FEM_ATTR_PORT_POSITIVE } from "../mesh";
-import { adaptFEMFrequencyData, buildFEMFrequencies, HCURL_CAPABILITIES, identifyFEMResonance, selectFEMPort, type FEMPointStatus, type FEMSimulationRequest, type FEMSimulationResult } from "../fem";
+import { adaptFEMFrequencyData, buildFEMCoaxRunConfig, buildFEMFrequencies, HCURL_CAPABILITIES, identifyFEMResonance, selectFEMPort, type FEMPointStatus, type FEMSimulationRequest, type FEMSimulationResult } from "../fem";
 import { solveFEMPoint, type FEMSolverInput } from "../fem-solver";
 import type { HcurlMtPackage, HcurlSolverModule } from "./hcurl-module";
 import { HCURL_ABI_VERSION, packHcurlPointRequest, unpackHcurlFarFieldBlob, unpackHcurlPointResponse } from "./hcurl-abi";
@@ -175,7 +175,8 @@ async function solve(
   onProgress: FEMProgressCallback,
 ): Promise<FEMSimulationResult> {
   const port = selectFEMPort(request);
-  if (port.positive.every((value, axis) => value === port.negative[axis])) throw new Error("Lumped-port terminals must be distinct");
+  if (port.positive.every((value, axis) => value === port.negative[axis])) throw new Error("Port terminals must be distinct");
+  const coaxConfig = buildFEMCoaxRunConfig(request);
   onProgress(0, 0, "meshing");
   const mesh = buildFEMMesh(request.model_ir, request.mesh_size_m, port);
   const frequencies = buildFEMFrequencies(request.start_mhz, request.stop_mhz, request.steps);
@@ -254,6 +255,8 @@ async function solve(
               phi_step_deg: request.far_field?.phi_step_deg ?? 5,
             }
             : undefined,
+          // Coax wave port (native coax.rs path): coax_port + exclude_boxes.
+          ...(coaxConfig ? coaxConfig.metadata : {}),
           abi_version: HCURL_ABI_VERSION,
         }),
       });
@@ -336,6 +339,8 @@ async function solve(
       referenceImpedanceOhms: request.reference_impedance_ohms,
       portPositive: [port.positive[0] ?? 0, port.positive[1] ?? 0, port.positive[2] ?? 0],
       portNegative: [port.negative[0] ?? 0, port.negative[1] ?? 0, port.negative[2] ?? 0],
+      // Coax wave port for the TypeScript fallback (fem-coax.ts path).
+      ...(coaxConfig ? { coaxPort: coaxConfig.solver.coaxPort, excludeBoxes: coaxConfig.solver.excludeBoxes } : {}),
     };
     const ffEnabled = request.far_field?.enabled ?? true;
     const ffOptions = ffEnabled

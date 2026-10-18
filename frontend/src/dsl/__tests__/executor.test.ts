@@ -45,4 +45,38 @@ describe("validateModelIR", () => {
     });
     expect(errors.map((error) => error.path)).toEqual(expect.arrayContaining(["entities[0].material", "entities[0].size"]));
   });
+
+  it("accepts a well-formed coax port and rejects malformed ones", () => {
+    const base = {
+      version: 1,
+      paramSchemaVersion: 1,
+      materials: [{ name: "copper", epsilon_r: 1, mu_r: 1 }],
+      entities: [],
+      boundaries: [],
+      meshHints: [],
+    };
+    const good = {
+      ...base,
+      ports: [{ id: "feed", kind: "coaxPort", center: [0, 0], ground_z_m: 0, pin_top_z_m: 0.0016, impedance_ohms: 50 }],
+    };
+    expect(validateModelIR(good)).toHaveLength(0);
+    const badTop = {
+      ...base,
+      ports: [{ id: "feed", kind: "coaxPort", center: [0, 0], ground_z_m: 0, pin_top_z_m: -0.001, impedance_ohms: 50 }],
+    };
+    expect(validateModelIR(badTop).map((e) => e.path)).toContain("ports[0].pin_top_z_m");
+    const badWidths = {
+      ...base,
+      ports: [{
+        id: "feed", kind: "coaxPort", center: [0, 0], ground_z_m: 0, pin_top_z_m: 0.0016,
+        pin_half_width_m: 0.003, dielectric_half_width_m: 0.0022, impedance_ohms: 50,
+      }],
+    };
+    expect(validateModelIR(badWidths).map((e) => e.path)).toContain("ports[0]");
+    const badKind = {
+      ...base,
+      ports: [{ id: "feed", kind: "wavePort", impedance_ohms: 50 }],
+    };
+    expect(validateModelIR(badKind).map((e) => e.path)).toContain("ports[0].kind");
+  });
 });

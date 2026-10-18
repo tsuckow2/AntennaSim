@@ -45,6 +45,7 @@ export async function executeParametricScript(code: string, values?: Record<stri
   addApi("box", (id, options) => api.box(String(id), options as Parameters<typeof api.box>[1]), apiObject);
   addApi("sheetRect", (id, options) => api.sheetRect(String(id), options as Parameters<typeof api.sheetRect>[1]), apiObject);
   addApi("lumpedPort", (id, options) => api.lumpedPort(String(id), options as Parameters<typeof api.lumpedPort>[1]), apiObject);
+  addApi("coaxPort", (id, options) => api.coaxPort(String(id), options as Parameters<typeof api.coaxPort>[1]), apiObject);
   addApi("airbox", (options) => api.airbox(options as Parameters<typeof api.airbox>[0]), apiObject);
   addApi("pml", (options) => api.pml(options as Parameters<typeof api.pml>[0]), apiObject);
   addApi("refine", (options) => api.refine(options as Parameters<typeof api.refine>[0]), apiObject);

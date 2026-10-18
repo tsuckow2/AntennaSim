@@ -16,6 +16,7 @@ import { Canvas } from "@react-three/fiber";
 import { OrbitControls } from "@react-three/drei";
 import { Quaternion, Vector3 } from "three";
 import type { ModelIR, Material, Vec3 } from "../../dsl/model-ir";
+import { resolveCoaxPort } from "../../dsl/model-ir";
 import type { PatternData } from "../../api/nec";
 import { RadiationPattern3D } from "../three/RadiationPattern3D";
 import { useUIStore } from "../../stores/uiStore";
@@ -131,8 +132,30 @@ function MaterialsMap({ ir }: { ir: ModelIR }) {
         return null;
       })}
 
-      {/* Lumped ports — separate positive and negative terminal markers */}
+      {/* Ports — lumped: positive/negative terminal markers; coax: the
+          feed section below the ground plane (frame outline + pin). */}
       {ir.ports.map((port) => {
+        if (port.kind === "coaxPort") {
+          const spec = resolveCoaxPort(port);
+          const sectionCenter: Vec3 = [spec.center[0], spec.center[1], (spec.portZ + spec.groundZ) / 2];
+          const [px, py, pz] = irToThree(sectionCenter);
+          const [sx, sy, sz] = irSizeToThree([spec.halfFrame * 2, spec.halfFrame * 2, spec.groundZ - spec.portZ]);
+          const pinCenter: Vec3 = [spec.center[0], spec.center[1], (spec.portZ + spec.pinTopZ) / 2];
+          const [qx, qy, qz] = irToThree(pinCenter);
+          const [tx, ty, tz] = irSizeToThree([spec.halfPin * 2, spec.halfPin * 2, spec.pinTopZ - spec.portZ]);
+          return (
+            <group key={port.id}>
+              <mesh position={[px, py, pz]}>
+                <boxGeometry args={[sx, sy, sz]} />
+                <meshStandardMaterial color="#F59E0B" transparent opacity={0.35} depthWrite={false} />
+              </mesh>
+              <mesh position={[qx, qy, qz]}>
+                <boxGeometry args={[tx, ty, tz]} />
+                <meshStandardMaterial color="#FF4444" emissive="#FF2222" emissiveIntensity={0.4} />
+              </mesh>
+            </group>
+          );
+        }
         const [positiveX, positiveY, positiveZ] = irToThree(port.positive);
         const [negativeX, negativeY, negativeZ] = irToThree(port.negative);
         return (

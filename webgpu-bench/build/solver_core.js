@@ -608,6 +608,7 @@ async function coreSolver(job) {
   const emptyLayout = device.createBindGroupLayout({ entries: [] });
   const pipes = {};
   for (const [key, entries] of Object.entries(SOLVER_ENTRIES)) {
+    if (key === 'ntff' && !NT) continue; // NTFF buffers exist only for ntff jobs
     for (const entry of entries) {
       const names = SOLVER_USAGE[key][entry];
       const groupLayouts = [], groupEntries = [[], [], [], []];

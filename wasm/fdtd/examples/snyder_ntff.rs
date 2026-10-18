@@ -120,9 +120,16 @@ fn main() {
     let mut sim = Fdtd::new(grid, mat, cpml, dt, feed, source, rsource, probe, None);
 
     let ntff_freqs = vec![2.00e9, 2.01e9, 2.02e9, 2.03e9];
+    // Box must FULLY enclose the substrate/ground (they span
+    // i/j 14..=218): faces at 13/219 clear the material by one
+    // cell, one cell inside the CPML (starts 12/220). The first
+    // run's box (16..216) cut through the substrate and ground,
+    // and its box flux ran 14% below the sphere power while the
+    // dipole/efs checks agreed to ~5% — v2 tests whether the
+    // material-crossing surface was the cause.
     let mut ntff = Ntff::new(
         &sim.grid,
-        NtffBox { i0: 16, i1: 216, j0: 16, j1: 216, k0: 16, k1: 45 },
+        NtffBox { i0: 13, i1: 219, j0: 13, j1: 219, k0: 13, k1: 48 },
         (X0 as f64, Y0 as f64, Z0 as f64),
         ntff_freqs.clone(),
         dt,

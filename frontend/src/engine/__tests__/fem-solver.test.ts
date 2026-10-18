@@ -202,6 +202,12 @@ describe("FEM H(curl) solver", () => {
     expect(z?.re ?? -1).toBeGreaterThanOrEqual(5);
     expect(z?.re ?? 1e9).toBeLessThanOrEqual(500);
     expect(Math.abs(z?.im ?? 1e9)).toBeLessThanOrEqual(200);
+    // AMS preconditioner parity with the native solver on this mesh:
+    // Zin = 66.6375 - j15.3179 ohm in 75 iterations (the SGS-only path
+    // needed ~1117; the native dipole parity band is <= 500).
+    expect(result.iterationCount ?? Number.POSITIVE_INFINITY).toBeLessThanOrEqual(500);
+    expect(Math.abs((z?.re ?? 0) - 66.6375)).toBeLessThan(0.5);
+    expect(Math.abs((z?.im ?? 0) + 15.3179)).toBeLessThan(0.5);
   }, 120000);
 
   it("computes a physical far-field pattern for the dipole", () => {

@@ -26,6 +26,13 @@
  * negative to the positive terminal, so Zin = V / 1A and
  * S11 = (Zin - Z0) / (Zin + Z0).
  *
+ * When the input carries a `coaxPort` specification, the lumped feed is
+ * replaced by the physical coax wave port implemented in `fem-coax.ts`
+ * (a mirror of the Rust `coax.rs`), and `excludeBoxes` remove tets from
+ * the active domain exactly as in the native solver. The Krylov solve
+ * uses the AMS preconditioner of `fem-ams.ts` by default, with an SGS
+ * fallback — mirroring the native production solver.
+ *
  * Time convention is e^{j omega t} throughout. The first-order Silver-Muller
  * term enters the weak form as +j k0 B, which is the dissipative (absorbing)
  * choice under this convention.
@@ -42,12 +49,22 @@ import {
   FEM_CONDUCTOR_CONDUCTIVITY_S_M,
   type FEMMeshArtifact,
 } from "./mesh";
+import { buildAmsPreconditioner, type AmsPreconditioner } from "./fem-ams";
+import {
+  assemblePortTriplets,
+  buildCoaxRhs,
+  coaxImpedance,
+  findPortFaces,
+  type CoaxPortSpec,
+} from "./fem-coax";
+
+export type { CoaxPortSpec } from "./fem-coax";
 
 const EPS0 = 8.8541878128e-12;
 const MU0 = 4 * Math.PI * 1e-7;
 
 /** Local node pairs for the six edges of a tetrahedron, in canonical order. */
-const TET_EDGES: ReadonlyArray<readonly [number, number]> = [
+export const TET_EDGES: ReadonlyArray<readonly [number, number]> = [
   [0, 1],
   [0, 2],
   [0, 3],
@@ -119,12 +136,35 @@ function regionMaterials(mesh: FEMMeshArtifact): Map<number, RegionMaterial> {
   return map;
 }
 
+/** Axis-aligned exclusion box: `[minx, miny, minz, maxx, maxy, maxz]` (meters). */
+export type ExcludeBox = readonly [number, number, number, number, number, number];
+
+/** True when tet `tet`'s centroid lies inside any exclusion box
+ * (inclusive bounds — mirrors `Mesh::is_inactive_tet` in the Rust solver). */
+function tetCentroidInBoxes(mesh: FEMMeshArtifact, tet: number, boxes: readonly ExcludeBox[]): boolean {
+  let cx = 0;
+  let cy = 0;
+  let cz = 0;
+  for (let k = 0; k < 4; k += 1) {
+    const vid = mesh.tetrahedra[tet * 4 + k] ?? 0;
+    cx += (mesh.vertices[vid * 3] ?? 0) / 4;
+    cy += (mesh.vertices[vid * 3 + 1] ?? 0) / 4;
+    cz += (mesh.vertices[vid * 3 + 2] ?? 0) / 4;
+  }
+  return boxes.some(
+    (b) => cx >= (b[0] ?? 0) && cy >= (b[1] ?? 0) && cz >= (b[2] ?? 0)
+      && cx <= (b[3] ?? 0) && cy <= (b[4] ?? 0) && cz <= (b[5] ?? 0),
+  );
+}
+
 /**
  * Enumerate global edges over the active (non-conductor) tets, orient each
  * edge from the lower to the higher global vertex index, and eliminate the
  * PEC-constrained edges (both endpoints on an attribute-20 facet).
+ * Tets whose centroid falls inside one of `excludeBoxes` are inactive too
+ * (the native solver's `exclude_boxes` metadata semantics).
  */
-export function buildEdgeSystem(mesh: FEMMeshArtifact): EdgeSystem {
+export function buildEdgeSystem(mesh: FEMMeshArtifact, excludeBoxes?: readonly ExcludeBox[]): EdgeSystem {
   const vertexCount = mesh.vertices.length / 3;
   const tetCount = mesh.tetrahedra.length / 4;
   if (!Number.isInteger(vertexCount) || !Number.isInteger(tetCount)) {
@@ -135,11 +175,15 @@ export function buildEdgeSystem(mesh: FEMMeshArtifact): EdgeSystem {
 
   const active: number[] = [];
   let conductorTetCount = 0;
+  const hasBoxes = excludeBoxes !== undefined && excludeBoxes.length > 0;
   for (let t = 0; t < tetCount; t += 1) {
     const region = mesh.tetRegions[t] ?? 0;
     const material = materials.get(region) ?? air;
     if (material.conductor) {
       conductorTetCount += 1;
+    } else if (hasBoxes && tetCentroidInBoxes(mesh, t, excludeBoxes)) {
+      // Excluded by metadata box: inactive, like a conductor tet, but not
+      // counted as one (mirrors the Rust is_inactive_tet distinction).
     } else {
       active.push(t);
     }
@@ -220,7 +264,7 @@ interface TetGeometry {
   centroid: Vec3;
 }
 
-function tetGeometry(vertices: Float64Array, tetrahedra: Uint32Array, tet: number): TetGeometry {
+export function tetGeometry(vertices: Float64Array, tetrahedra: Uint32Array, tet: number): TetGeometry {
   const px = new Float64Array(4);
   const py = new Float64Array(4);
   const pz = new Float64Array(4);
@@ -629,11 +673,18 @@ function assembleAbcTriplets(
   }
 }
 
-/** Assemble the full complex free-DOF system matrix at a given frequency. */
+/**
+ * Assemble the full complex free-DOF system matrix at a given frequency.
+ * When `coaxPort` is given, the port faces' TEM absorbing term
+ * (`j k_d B`, mirror of the Rust coax assembly) is added; `system` must
+ * then be the edge system the port faces are found on (built with the
+ * same exclusion boxes as the solve).
+ */
 export function assembleHcurl(
   mesh: FEMMeshArtifact,
   frequencyHz: number,
   system?: EdgeSystem,
+  coaxPort?: CoaxPortSpec,
 ): HcurlAssembly {
   if (!Number.isFinite(frequencyHz) || frequencyHz <= 0) {
     throw new Error("frequencyHz must be a positive finite value");
@@ -686,11 +737,22 @@ export function assembleHcurl(
     re.push(0);
     im.push(abcIm[k] ?? 0);
   }
+  // Coax wave port: TEM absorbing term j k_d B on the port faces.
+  if (coaxPort !== undefined) {
+    const faces = findPortFaces(mesh, sys, coaxPort);
+    const port = assemblePortTriplets(mesh, sys, coaxPort, faces, frequencyHz);
+    for (let k = 0; k < port.rows.length; k += 1) {
+      rows.push(port.rows[k] ?? 0);
+      cols.push(port.cols[k] ?? 0);
+      re.push(0);
+      im.push(port.im[k] ?? 0);
+    }
+  }
   return { system: sys, matrix: complexCsrFromTriplets(n, rows, cols, re, im) };
 }
 
 /* ------------------------------------------------------------------ */
-/* Complex BiCGSTAB with Jacobi preconditioning                          */
+/* Complex BiCGSTAB with Jacobi / SGS / AMS preconditioning              */
 /* ------------------------------------------------------------------ */
 
 export interface KrylovResult {
@@ -739,7 +801,7 @@ export function bicgstab(
   bIm: Float64Array,
   tol = 1e-8,
   maxIter = 5000,
-  preconditioner: "jacobi" | "sgs" = "jacobi",
+  preconditioner: "jacobi" | "sgs" | AmsPreconditioner = "jacobi",
 ): KrylovResult {
   const n = matrix.n;
   const xRe = new Float64Array(n);
@@ -794,7 +856,7 @@ export function bicgstab(
   const yRe = new Float64Array(n);
   const yIm = new Float64Array(n);
   const applyPre = (xr: Float64Array, xi: Float64Array, yr: Float64Array, yi: Float64Array): void => {
-    if (preconditioner === "sgs") {
+    if (preconditioner !== "jacobi") {
       // One symmetric Gauss-Seidel sweep: M z = r with
       // M = (D + L) D^{-1} (D + U). Forward sweep solves (D + L) y = r,
       // backward sweep solves (D + U) z = D y. CSR rows give both the
@@ -846,6 +908,12 @@ export function bicgstab(
           yr[i] = (sr * dr + si * di) / d;
           yi[i] = (si * dr - sr * di) / d;
         }
+      }
+      if (typeof preconditioner === "object") {
+        // Additive AMS (mirror of the Rust Preconditioner::Ams apply):
+        // the SGS smoother above, plus the coarse discrete-gradient
+        // correction on the original residual.
+        preconditioner.applyCorrection(xr, xi, yr, yi);
       }
       return;
     }
@@ -2015,6 +2083,22 @@ export interface FEMSolverInput {
    * of accuracy for much shorter solves; the default is unchanged.
    */
   krylovTolerance?: number;
+  /**
+   * Coax wave port specification. When present, the lumped gap feed
+   * (portPositive / portNegative) is replaced by the physical coax port
+   * of `fem-coax.ts`: TEM absorbing faces plus an incident-wave drive,
+   * with V/I extraction at the reference plane. Mirrors the native
+   * solver's `coax_port` request metadata.
+   */
+  coaxPort?: CoaxPortSpec;
+  /**
+   * Axis-aligned exclusion boxes `[minx, miny, minz, maxx, maxy, maxz]`
+   * (meters); tets whose centroid falls inside any box are excluded
+   * from the active domain (like conductor tets). Mirrors the native
+   * solver's `exclude_boxes` metadata — used to remove the stub behind
+   * a coax port plane so the plane is a true boundary.
+   */
+  excludeBoxes?: readonly ExcludeBox[];
 }
 
 export type FEMSolverStatus = "ok" | "solver_error" | "non_finite";
@@ -2062,7 +2146,7 @@ export function solveFEMPoint(input: FEMSolverInput): FEMSolverResult {
       return fail("solver_error", "referenceImpedanceOhms must be a positive finite value");
     }
     const t0 = performance.now();
-    const system = buildEdgeSystem(input.mesh);
+    const system = buildEdgeSystem(input.mesh, input.excludeBoxes);
     if (system.freeDofCount <= 0) {
       return fail("solver_error", "no free edge DOFs remain after PEC elimination");
     }
@@ -2072,17 +2156,39 @@ export function solveFEMPoint(input: FEMSolverInput): FEMSolverResult {
         `mesh has ${system.freeDofCount} free edge DOFs, above the TypeScript reference solver limit of ${FEM_TS_SOLVER_MAX_FREE_DOFS}`,
       );
     }
-    const { matrix } = assembleHcurl(input.mesh, input.frequencyHz, system);
+    const coaxPort = input.coaxPort;
+    const portFaces = coaxPort !== undefined ? findPortFaces(input.mesh, system, coaxPort) : undefined;
+    if (coaxPort !== undefined && !(portFaces ?? []).some((f) => !f.top)) {
+      return fail(
+        "solver_error",
+        "coax port: no driven port faces found at z_port (check the exclusion boxes and port geometry)",
+      );
+    }
+    const { matrix } = assembleHcurl(input.mesh, input.frequencyHz, system, coaxPort);
     const t1 = performance.now();
     const omega = 2 * Math.PI * input.frequencyHz;
-    const feed = selectGapFeed(input.mesh, system, input.portPositive, input.portNegative);
-    const rhs = buildPortRhs(input.mesh, system, feed, omega);
+    let feed: GapFeed | undefined;
+    let rhs: { re: Float64Array; im: Float64Array };
+    if (coaxPort !== undefined) {
+      rhs = buildCoaxRhs(input.mesh, system, coaxPort, portFaces ?? [], input.frequencyHz);
+    } else {
+      feed = selectGapFeed(input.mesh, system, input.portPositive, input.portNegative);
+      rhs = buildPortRhs(input.mesh, system, feed, omega);
+    }
     const krylovTol =
       input.krylovTolerance != null && Number.isFinite(input.krylovTolerance) && input.krylovTolerance > 0
         ? input.krylovTolerance
         : 1e-7;
-    // The 908 MHz patch needs ~9.2k iterations at 98k DOFs; cap at 12k for headroom.
-    const kry = bicgstab(matrix, rhs.re, rhs.im, krylovTol, 12000, "sgs");
+    // AMS by default, mirroring the native production solver; SGS only
+    // when the AMS build fails. (With SGS alone the 908 MHz patch needs
+    // ~9.2k iterations at 98k DOFs; the 12k cap stays as headroom.)
+    let pre: "sgs" | AmsPreconditioner = "sgs";
+    try {
+      pre = buildAmsPreconditioner(input.mesh, system, matrix);
+    } catch {
+      pre = "sgs";
+    }
+    const kry = bicgstab(matrix, rhs.re, rhs.im, krylovTol, 12000, pre);
     const t2 = performance.now();
     timingMs.assembly = t1 - t0;
     timingMs.solve = t2 - t1;
@@ -2096,10 +2202,22 @@ export function solveFEMPoint(input: FEMSolverInput): FEMSolverResult {
         iterationCount: kry.iterations,
       };
     }
-    const v = portVoltage(input.mesh, system, feed, input.portNegative, kry.xRe, kry.xIm);
-    // The impressed current is normalized to 1 A, so Zin = V.
-    const zRe = v.re;
-    const zIm = v.im;
+    let zRe: number;
+    let zIm: number;
+    if (coaxPort !== undefined) {
+      // V/I extraction at the reference plane; a ratio of total fields,
+      // so the incident-wave amplitude cancels.
+      const z = coaxImpedance(input.mesh, system, coaxPort, kry.xRe, kry.xIm, input.frequencyHz);
+      zRe = z.re;
+      zIm = z.im;
+    } else if (feed !== undefined) {
+      const v = portVoltage(input.mesh, system, feed, input.portNegative, kry.xRe, kry.xIm);
+      // The impressed current is normalized to 1 A, so Zin = V.
+      zRe = v.re;
+      zIm = v.im;
+    } else {
+      return fail("solver_error", "internal: neither a coax port nor a gap feed was selected");
+    }
     if (!Number.isFinite(zRe) || !Number.isFinite(zIm)) {
       return {
         ...blank,

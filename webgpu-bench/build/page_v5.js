@@ -130,7 +130,7 @@ function cpuStep(f, nx, ny, nz, p) {
 // Page state
 // ---------------------------------------------------------------------------
 const $ = id => document.getElementById(id);
-const PAGE_VERSION = 'v5.9';
+const PAGE_VERSION = 'v6.0';
 const results = { page: 'webgpu-fdtd-test-bench', version: 2, pageVersion: PAGE_VERSION, runs: [] };
 let adapter = null, device = null, adapterSnapshot = null;
 let stopRequested = false;
@@ -514,7 +514,7 @@ function buildSnyderSolver(cfg) {
   const SUB_H = F(1.575e-3), subHalf = F(F(101.6e-3) / 2);
   const patchHx = F(F(28.2084e-3) / 2), patchHy = F(F(37.5789e-3) / 2);
   const PROBE_X = F(F(-14.1042e-3) + F(7.5658e-3)), PROBE_HALF = F(0.65e-3);
-  const EPS_R = F(4.4);
+  const EPS_R = F(cfg.er !== undefined ? cfg.er : 4.4);
   const sigmaSub = F(F(F(F(F(2.0 * F(Math.PI)) * F(2.5e9)) * EPS0) * EPS_R) * F(0.02));
   const kGround = G.kGround, kPatch = G.kPatch, kSrc = G.kSrc;
   const pcI = Math.round(F(F(F(PROBE_X - X0) / DX) - 0.5));
@@ -715,6 +715,260 @@ function paramsBytes(p) {
 }
 
 // ---------------------------------------------------------------------------
+// NTFF (Huygens-box near-to-far-field) — JS/WGSL port of
+// wasm/fdtd/src/ntff.rs (see that file for the physics and the
+// solver-stores-(−H) sign convention: H phasors are negated wherever
+// they are consumed). GPU side: per-step DFT phasor accumulation in
+// two kernels (E comps / H comps — split to stay under the
+// 8-storage-buffer floor), phases computed in-kernel from the state
+// step counter (source_step has already incremented it, so
+// t_e = state[0]·dt, t_h = t_e − dt/2, exactly as the CPU driver's
+// accumulate-after-step). Far field: one kernel evaluates U(θ,φ)
+// per frequency from the raw accumulators; box flux, sphere
+// integration and P_acc run in JS (f64) over the read-back phasors.
+// ---------------------------------------------------------------------------
+const NTFF_WGSL = `
+struct NtffU { dt: f32, nfreq: u32, nsamp: u32, _p: u32, omega: vec4<f32> };
+struct FarU { freq: u32, nsamp: u32, nth: u32, nph: u32, kk: f32, scale: f32, _p0: u32, _p1: u32 };
+@group(0) @binding(2) var<storage, read_write> ex: array<f32>;
+@group(0) @binding(3) var<storage, read_write> ey: array<f32>;
+@group(0) @binding(4) var<storage, read_write> ez: array<f32>;
+@group(0) @binding(5) var<storage, read_write> hx: array<f32>;
+@group(0) @binding(6) var<storage, read_write> hy: array<f32>;
+@group(0) @binding(7) var<storage, read_write> hz: array<f32>;
+@group(3) @binding(20) var<storage, read_write> state: array<u32>;
+@group(3) @binding(22) var<storage, read> tbl: array<u32>;
+@group(3) @binding(23) var<storage, read_write> acc: array<f32>;
+@group(3) @binding(24) var<storage, read> geom: array<f32>;
+@group(3) @binding(25) var<storage, read_write> farout: array<f32>;
+@group(3) @binding(26) var<uniform> nu: NtffU;
+@group(3) @binding(27) var<uniform> fu: FarU;
+
+fn getE(a: u32, ix: u32) -> f32 {
+  if (a == 0u) { return ex[ix]; }
+  if (a == 1u) { return ey[ix]; }
+  return ez[ix];
+}
+fn getH(a: u32, ix: u32) -> f32 {
+  if (a == 0u) { return hx[ix]; }
+  if (a == 1u) { return hy[ix]; }
+  return hz[ix];
+}
+
+@compute @workgroup_size(256)
+fn ntff_accum_e(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let si = gid.x;
+  if (si >= nu.nsamp) { return; }
+  let t_e = f32(state[0]) * nu.dt;
+  let b = si * 16u;
+  let ea = 0.25 * (getE(tbl[b], tbl[b + 1u]) + getE(tbl[b], tbl[b + 2u]) +
+                   getE(tbl[b], tbl[b + 3u]) + getE(tbl[b], tbl[b + 4u]));
+  let eb = 0.25 * (getE(tbl[b + 5u], tbl[b + 6u]) + getE(tbl[b + 5u], tbl[b + 7u]) +
+                   getE(tbl[b + 5u], tbl[b + 8u]) + getE(tbl[b + 5u], tbl[b + 9u]));
+  for (var f = 0u; f < nu.nfreq; f++) {
+    let ph = nu.omega[f] * t_e;
+    let c = cos(ph); let s = sin(ph);
+    let o = ((f * nu.nsamp) + si) * 8u;
+    acc[o] += ea * c;        acc[o + 1u] -= ea * s;
+    acc[o + 2u] += eb * c;   acc[o + 3u] -= eb * s;
+  }
+}
+
+@compute @workgroup_size(256)
+fn ntff_accum_h(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let si = gid.x;
+  if (si >= nu.nsamp) { return; }
+  let t_h = f32(state[0]) * nu.dt - 0.5 * nu.dt;
+  let b = si * 16u;
+  let ha = 0.5 * (getH(tbl[b + 10u], tbl[b + 11u]) + getH(tbl[b + 10u], tbl[b + 12u]));
+  let hb = 0.5 * (getH(tbl[b + 13u], tbl[b + 14u]) + getH(tbl[b + 13u], tbl[b + 15u]));
+  for (var f = 0u; f < nu.nfreq; f++) {
+    let ph = nu.omega[f] * t_h;
+    let c = cos(ph); let s = sin(ph);
+    let o = ((f * nu.nsamp) + si) * 8u;
+    acc[o + 4u] += ha * c;   acc[o + 5u] -= ha * s;
+    acc[o + 6u] += hb * c;   acc[o + 7u] -= hb * s;
+  }
+}
+
+// Complex helpers as vec2 (re, im).
+fn cmul(a: vec2<f32>, b: vec2<f32>) -> vec2<f32> {
+  return vec2<f32>(a.x * b.x - a.y * b.y, a.x * b.y + a.y * b.x);
+}
+
+@compute @workgroup_size(16, 16)
+fn ntff_far(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let ti = gid.y; let pi = gid.x;
+  if (ti >= fu.nth || pi >= fu.nph) { return; }
+  let th = 3.14159265358979 * f32(ti) / f32(fu.nth - 1u);
+  let ph = 6.28318530717959 * f32(pi) / f32(fu.nph);
+  let st = sin(th); let ct = cos(th); let sp = sin(ph); let cp = cos(ph);
+  let r = vec3<f32>(st * cp, st * sp, ct);
+  let thh = vec3<f32>(ct * cp, ct * sp, -st);
+  let phh = vec3<f32>(-sp, cp, 0.0);
+  var nv = array<vec2<f32>, 3>(vec2<f32>(0.0), vec2<f32>(0.0), vec2<f32>(0.0));
+  var lv = array<vec2<f32>, 3>(vec2<f32>(0.0), vec2<f32>(0.0), vec2<f32>(0.0));
+  for (var si = 0u; si < fu.nsamp; si++) {
+    let o = ((fu.freq * fu.nsamp) + si) * 8u;
+    let ea = vec2<f32>(acc[o], acc[o + 1u]) * fu.scale;
+    let eb = vec2<f32>(acc[o + 2u], acc[o + 3u]) * fu.scale;
+    let ha = -vec2<f32>(acc[o + 4u], acc[o + 5u]) * fu.scale;
+    let hb = -vec2<f32>(acc[o + 6u], acc[o + 7u]) * fu.scale;
+    let g = si * 13u;
+    let pos = vec3<f32>(geom[g], geom[g + 1u], geom[g + 2u]);
+    let n = vec3<f32>(geom[g + 3u], geom[g + 4u], geom[g + 5u]);
+    let a = vec3<f32>(geom[g + 6u], geom[g + 7u], geom[g + 8u]);
+    let b = vec3<f32>(geom[g + 9u], geom[g + 10u], geom[g + 11u]);
+    let da = geom[g + 12u];
+    var e = array<vec2<f32>, 3>();
+    var h = array<vec2<f32>, 3>();
+    for (var c = 0u; c < 3u; c++) {
+      e[c] = ea * a[c] + eb * b[c];
+      h[c] = ha * a[c] + hb * b[c];
+    }
+    // Js = n x h (cross_fv), Ms = e x n (cross_vf) — ntff.rs forms.
+    let js = array<vec2<f32>, 3>(
+      h[2] * n.y - h[1] * n.z, h[0] * n.z - h[2] * n.x, h[1] * n.x - h[0] * n.y);
+    let ms = array<vec2<f32>, 3>(
+      e[1] * n.z - e[2] * n.y, e[2] * n.x - e[0] * n.z, e[0] * n.y - e[1] * n.x);
+    let phz = fu.kk * dot(r, pos);
+    let w = vec2<f32>(cos(phz), sin(phz)) * da;
+    for (var c = 0u; c < 3u; c++) {
+      nv[c] += cmul(js[c], w);
+      lv[c] += cmul(ms[c], w);
+    }
+  }
+  let nth_ = nv[0] * thh.x + nv[1] * thh.y + nv[2] * thh.z;
+  let nph_ = nv[0] * phh.x + nv[1] * phh.y + nv[2] * phh.z;
+  let lth = lv[0] * thh.x + lv[1] * thh.y + lv[2] * thh.z;
+  let lph = lv[0] * phh.x + lv[1] * phh.y + lv[2] * phh.z;
+  let eta = 376.730313668;
+  let fac = fu.kk / (4.0 * 3.14159265358979);
+  let eth = (lph + nth_ * eta) * fac;
+  let eph = (lth - nph_ * eta) * fac;
+  farout[ti * fu.nph + pi] =
+    (dot(eth, eth) + dot(eph, eph)) / (2.0 * eta);
+}
+`;
+SOLVER_SHADERS.ntff = NTFF_WGSL;
+Object.assign(SOLVER_DECL, {
+  ntff_tbl: { binding: 22, kind: 'storage', rw: false },
+  ntff_acc: { binding: 23, kind: 'storage', rw: true },
+  ntff_geom: { binding: 24, kind: 'storage', rw: false },
+  ntff_far: { binding: 25, kind: 'storage', rw: true },
+  ntff_u: { binding: 26, kind: 'uniform', rw: false },
+  ntff_fu: { binding: 27, kind: 'uniform', rw: false },
+});
+SOLVER_USAGE.ntff = {
+  ntff_accum_e: ['ex', 'ey', 'ez', 'state', 'ntff_tbl', 'ntff_acc', 'ntff_u'],
+  ntff_accum_h: ['hx', 'hy', 'hz', 'state', 'ntff_tbl', 'ntff_acc', 'ntff_u'],
+  ntff_far: ['ntff_acc', 'ntff_geom', 'ntff_far', 'ntff_fu'],
+};
+
+// Sample/gather tables for the Huygens box — a line-for-line port of
+// Ntff::new (push order [+z, −z, +x, −x, +y, −y]; index functions are
+// the grid's own, parameterized by the variant dims — NOT the globals
+// in solver_core, which are bound to the base variant).
+function buildNtffTables(G, bx) {
+  const NX = G.NX, NY = G.NY;
+  const dx = G.DX, dy = G.DY, dz = G.DZ;
+  const ox = G.X0, oy = G.Y0, oz = G.Z0;
+  const exI = (i, j, k) => (k * NY + j) * (NX + 1) + i;
+  const eyI = (i, j, k) => (k * (NY + 1) + j) * NX + i;
+  const ezI = (i, j, k) => (k * NY + j) * NX + i;
+  const hxI = (i, j, k) => (k * (NY + 1) + j) * NX + i;
+  const hyI = (i, j, k) => (k * NY + j) * (NX + 1) + i;
+  const hzI = (i, j, k) => (k * (NY + 1) + j) * (NX + 1) + i;
+  const tbl = [], geom = [];
+  const push = (pos, da, n, a, b, ea, eb, ha, hb) => {
+    // ea/eb: [arrayCode, i0..i3]; ha/hb: [arrayCode, i0, i1].
+    tbl.push(ea[0], ea[1], ea[2], ea[3], ea[4],
+             eb[0], eb[1], eb[2], eb[3], eb[4],
+             ha[0], ha[1], ha[2], hb[0], hb[1], hb[2]);
+    geom.push(pos[0], pos[1], pos[2], n[0], n[1], n[2],
+              a[0], a[1], a[2], b[0], b[1], b[2], da);
+  };
+  const A4 = idxs => idxs; // array code prepended by caller
+  // z faces: a=+x (Ex, code 0), b=+y (Ey, code 1); H: a=Hx(0), b=Hy(1)
+  for (const [kplane, ns] of [[bx.k1, 1], [bx.k0, -1]]) {
+    for (let j = bx.j0; j < bx.j1; j++) for (let i = bx.i0; i < bx.i1; i++) {
+      push([(i + 0.5) * dx + ox, (j + 0.5) * dy + oy, kplane * dz + oz], dx * dy,
+        [0, 0, ns], [1, 0, 0], [0, 1, 0],
+        A4([0, exI(i, j, kplane - 1), exI(i + 1, j, kplane - 1), exI(i, j, kplane), exI(i + 1, j, kplane)]),
+        A4([1, eyI(i, j, kplane - 1), eyI(i, j + 1, kplane - 1), eyI(i, j, kplane), eyI(i, j + 1, kplane)]),
+        [0, hxI(i, j, kplane - 1), hxI(i, j - 1, kplane - 1)],
+        [1, hyI(i, j, kplane - 1), hyI(i - 1, j, kplane - 1)]);
+    }
+  }
+  // x faces: a=+y (Ey, 1), b=+z (Ez, 2); H: a=Hy(1), b=Hz(2)
+  for (const [iplane, ns] of [[bx.i1, 1], [bx.i0, -1]]) {
+    for (let k = bx.k0; k < bx.k1; k++) for (let j = bx.j0; j < bx.j1; j++) {
+      push([iplane * dx + ox, (j + 0.5) * dy + oy, (k + 0.5) * dz + oz], dy * dz,
+        [ns, 0, 0], [0, 1, 0], [0, 0, 1],
+        A4([1, eyI(iplane - 1, j, k), eyI(iplane, j, k), eyI(iplane - 1, j + 1, k), eyI(iplane, j + 1, k)]),
+        A4([2, ezI(iplane - 1, j, k), ezI(iplane, j, k), ezI(iplane - 1, j, k + 1), ezI(iplane, j, k + 1)]),
+        [1, hyI(iplane - 1, j, k), hyI(iplane - 1, j, k - 1)],
+        [2, hzI(iplane - 1, j, k), hzI(iplane - 1, j - 1, k)]);
+    }
+  }
+  // y faces: a=+z (Ez, 2), b=+x (Ex, 0); H: a=Hz(2), b=Hx(0)
+  for (const [jplane, ns] of [[bx.j1, 1], [bx.j0, -1]]) {
+    for (let k = bx.k0; k < bx.k1; k++) for (let i = bx.i0; i < bx.i1; i++) {
+      push([(i + 0.5) * dx + ox, jplane * dy + oy, (k + 0.5) * dz + oz], dx * dz,
+        [0, ns, 0], [0, 0, 1], [1, 0, 0],
+        A4([2, ezI(i, jplane - 1, k), ezI(i, jplane, k), ezI(i, jplane - 1, k + 1), ezI(i, jplane, k + 1)]),
+        A4([0, exI(i, jplane - 1, k), exI(i + 1, jplane - 1, k), exI(i, jplane, k), exI(i + 1, jplane, k)]),
+        [2, hzI(i, jplane - 1, k), hzI(i - 1, jplane - 1, k)],
+        [0, hxI(i, jplane - 1, k), hxI(i, jplane - 1, k - 1)]);
+    }
+  }
+  return {
+    n: tbl.length / 16,
+    tbl: Uint32Array.from(tbl),
+    geom: Float32Array.from(geom),
+  };
+}
+
+// DFT phasors of the recorded (V, I) series at one frequency — the
+// same Goertzel recurrence and conventions as the band DFT below and
+// DftProbe::dft: X = Σ x·e^(−iωt). Returns [[vr, vi], [ir, ii]].
+function dftAtFreq(V, I, fhz, dt) {
+  const wdt = 2 * Math.PI * fhz * dt;
+  const cw = Math.cos(wdt), sw = Math.sin(wdt);
+  let c = 1, s = 0, vr = 0, vi = 0, ir = 0, ii = 0;
+  for (let n = 0; n < V.length; n++) {
+    vr += V[n] * c; vi -= V[n] * s; ir += I[n] * c; ii -= I[n] * s;
+    const cn = c * cw - s * sw; s = s * cw + c * sw; c = cn;
+  }
+  return [[vr, vi], [ir, ii]];
+}
+
+// Box Poynting flux from read-back raw accumulators (port of
+// Ntff::box_flux / flux_at; phasors scaled 2/N, H negated).
+function ntffBoxFlux(acc, geom, nsamp, fi, steps) {
+  const sc = 2 / steps;
+  let total = 0;
+  for (let si = 0; si < nsamp; si++) {
+    const o = (fi * nsamp + si) * 8;
+    const ea = [acc[o] * sc, acc[o + 1] * sc], eb = [acc[o + 2] * sc, acc[o + 3] * sc];
+    const ha = [-acc[o + 4] * sc, -acc[o + 5] * sc], hb = [-acc[o + 6] * sc, -acc[o + 7] * sc];
+    const g = si * 13;
+    const n = [geom[g + 3], geom[g + 4], geom[g + 5]];
+    const a = [geom[g + 6], geom[g + 7], geom[g + 8]];
+    const b = [geom[g + 9], geom[g + 10], geom[g + 11]];
+    const da = geom[g + 12];
+    const E = [0, 1, 2].map(c => [ea[0] * a[c] + eb[0] * b[c], ea[1] * a[c] + eb[1] * b[c]]);
+    const H = [0, 1, 2].map(c => [ha[0] * a[c] + hb[0] * b[c], ha[1] * a[c] + hb[1] * b[c]]);
+    // S = E x conj(H); flux comp c uses Re of the cyclic products.
+    const sx = E[1][0] * H[2][0] + E[1][1] * H[2][1] - (E[2][0] * H[1][0] + E[2][1] * H[1][1]);
+    const sy = E[2][0] * H[0][0] + E[2][1] * H[0][1] - (E[0][0] * H[2][0] + E[0][1] * H[2][1]);
+    const sz = E[0][0] * H[1][0] + E[0][1] * H[1][1] - (E[1][0] * H[0][0] + E[1][1] * H[0][1]);
+    total += 0.5 * (sx * n[0] + sy * n[1] + sz * n[2]) * da;
+  }
+  return total;
+}
+
+// ---------------------------------------------------------------------------
 // Solver runner: builds buffers + pipelines from SOLVER_SHADERS/SOLVER_USAGE
 // (one minimal bind-group layout per entry point), then steps in the exact
 // native order (gpu.rs GpuFdtd::run): H, CPML-H (face order), wire_update,
@@ -725,6 +979,7 @@ const SOLVER_ENTRIES = {
   e: ['update_ex', 'update_ey', 'update_ez'],
   cpml: ['cpml_e_x', 'cpml_e_y', 'cpml_e_z', 'cpml_h_x', 'cpml_h_y', 'cpml_h_z'],
   misc: ['wire_update', 'wire_deposit', 'pec_ex', 'pec_ey', 'pec_ez', 'source_step'],
+  ntff: ['ntff_accum_e', 'ntff_accum_h', 'ntff_far'],
 };
 const BINDING_GROUP = b => (b === 0 || (b >= 2 && b <= 7)) ? 0 : (b >= 8 && b <= 16) ? 1 : (b === 1 || b === 17 || b === 18) ? 2 : 3;
 
@@ -775,6 +1030,32 @@ async function coreSolver(job) {
     device.queue.writeBuffer(faceBuf, 0, fb);
   }
   bufByBinding[1] = faceBuf;
+
+  // NTFF setup (job.ntff = { freqs: [Hz...], box: {i0,i1,j0,j1,k0,k1} }).
+  let NT = null;
+  if (job.ntff) {
+    const G = snyderGeom(cfg.zref3 ? 'zref3' : cfg.zref2 ? 'zref2' : cfg.zref ? 'zref' : '', cfg.cfl);
+    const bx = Object.assign({ i0: 13, i1: 219, j0: 13, j1: 219, k0: 13, k1: 48 }, job.ntff.box || {});
+    const freqs = job.ntff.freqs || [2.00e9, 2.01e9, 2.02e9, 2.03e9];
+    const T = buildNtffTables(G, bx);
+    NT = { freqs, nsamp: T.n, geom: T.geom, nth: 91, nph: 180 };
+    bufByBinding[22] = putBuf('ntff_tbl', T.tbl, usageRO);
+    bufByBinding[23] = mkBuf('ntff_acc', freqs.length * T.n * 8 * 4, usageRW);
+    bufByBinding[24] = putBuf('ntff_geom', T.geom, usageRO);
+    bufByBinding[25] = mkBuf('ntff_far', NT.nth * NT.nph * 4, usageRW);
+    const nuBuf = mkBuf('ntff_u', 32, GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST);
+    {
+      const ab = new ArrayBuffer(32); const dv = new DataView(ab);
+      dv.setFloat32(0, B.dims.dt, true);
+      dv.setUint32(4, freqs.length, true);
+      dv.setUint32(8, T.n, true);
+      freqs.forEach((f, i) => dv.setFloat32(16 + 4 * i, 2 * Math.PI * f, true));
+      device.queue.writeBuffer(nuBuf, 0, ab);
+    }
+    bufByBinding[26] = nuBuf;
+    bufByBinding[27] = mkBuf('ntff_fu', 32, GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST);
+    log(`NTFF: ${T.n} samples, freqs ${freqs.map(f => (f / 1e9).toFixed(2)).join('/')} GHz`);
+  }
 
   // Shader modules + compilation check.
   const modules = {};
@@ -866,6 +1147,11 @@ async function coreSolver(job) {
       setP(pass, 'pec_ey'); disp(pass, pecDisp[1]);
       setP(pass, 'pec_ez'); disp(pass, pecDisp[2]);
       setP(pass, 'source_step'); pass.dispatchWorkgroups(1, 1, 1);
+      if (NT) {
+        const nd = Math.ceil(NT.nsamp / 256);
+        setP(pass, 'ntff_accum_e'); pass.dispatchWorkgroups(nd, 1, 1);
+        setP(pass, 'ntff_accum_h'); pass.dispatchWorkgroups(nd, 1, 1);
+      }
     }
     pass.end();
     device.queue.submit([enc.finish()]);
@@ -900,6 +1186,76 @@ async function coreSolver(job) {
   }
   let tailMax = 0;
   for (let s = Math.max(0, done - 100); s < done; s++) tailMax = Math.max(tailMax, Math.abs(V[s]));
+  // NTFF evaluation: far-field per frequency on the GPU, flux +
+  // sphere integration + accepted power in JS (mirrors snyder_ntff.rs).
+  let ntffResults = null, ntffProbe = null;
+  if (NT) {
+    const acc = await readback(bufByBinding[23], NT.freqs.length * NT.nsamp * 8);
+    const scale = 2 / done;
+    ntffResults = [];
+    for (let fi = 0; fi < NT.freqs.length; fi++) {
+      const f = NT.freqs[fi];
+      {
+        const ab = new ArrayBuffer(32); const dv = new DataView(ab);
+        dv.setUint32(0, fi, true); dv.setUint32(4, NT.nsamp, true);
+        dv.setUint32(8, NT.nth, true); dv.setUint32(12, NT.nph, true);
+        dv.setFloat32(16, 2 * Math.PI * f / 299792458.0, true);
+        dv.setFloat32(20, scale, true);
+        device.queue.writeBuffer(bufByBinding[27], 0, ab);
+      }
+      const enc = device.createCommandEncoder();
+      const pass = enc.beginComputePass();
+      setP(pass, 'ntff_far');
+      pass.dispatchWorkgroups(Math.ceil(NT.nph / 16), Math.ceil(NT.nth / 16), 1);
+      pass.end();
+      device.queue.submit([enc.finish()]);
+      const U = await readback(bufByBinding[25], NT.nth * NT.nph);
+      let prad = 0, umax = 0, atT = 0;
+      const dth = Math.PI / (NT.nth - 1), dph = 2 * Math.PI / NT.nph;
+      for (let ti = 0; ti < NT.nth; ti++) {
+        const wt = (ti === 0 || ti === NT.nth - 1) ? 0.5 : 1;
+        const th = Math.PI * ti / (NT.nth - 1);
+        for (let pi = 0; pi < NT.nph; pi++) {
+          const uu = U[ti * NT.nph + pi];
+          prad += uu * Math.sin(th) * wt * dth * dph;
+          if (uu > umax) { umax = uu; atT = th; }
+        }
+      }
+      const flux = ntffBoxFlux(acc, NT.geom, NT.nsamp, fi, done);
+      const [[vr, vi], [ir, ii]] = dftAtFreq(V, I, f, B.dims.dt);
+      const pAcc = 0.5 * scale * scale * (vr * ir + vi * ii);
+      const dlin = 4 * Math.PI * umax / prad;
+      const gain = 4 * Math.PI * umax / pAcc;
+      ntffResults.push({
+        freqMHz: +(f / 1e6).toFixed(1), pAcc, flux, prad,
+        eff: +(prad / pAcc).toFixed(4),
+        dmaxDbi: +(10 * Math.log10(dlin)).toFixed(2),
+        gainDbi: +(10 * Math.log10(gain)).toFixed(2),
+        thetaMaxDeg: +(atT * 180 / Math.PI).toFixed(1),
+        fluxOverPrad: +(flux / prad).toFixed(3),
+      });
+    }
+    // Parity-gate probe: scaled phasors (H negated) of a few samples
+    // at freq 0 + raw |acc| sums per frequency.
+    const probeIdx = [0, 1, 1000, 50000, NT.nsamp - 1];
+    ntffProbe = {
+      samples: probeIdx.map(si => {
+        const o = si * 8; // freq 0 block
+        const ph = [];
+        for (let c = 0; c < 4; c++) {
+          let re = acc[o + c * 2] * scale, im = acc[o + c * 2 + 1] * scale;
+          if (c >= 2) { re = -re; im = -im; }
+          ph.push([+re.toFixed(6), +im.toFixed(6)]);
+        }
+        return [si, ph];
+      }),
+      accAbsSum: NT.freqs.map((_, fi) => {
+        let s = 0;
+        for (let i = fi * NT.nsamp * 8; i < (fi + 1) * NT.nsamp * 8; i++) s += Math.abs(acc[i]);
+        return +s.toExponential(5);
+      }),
+    };
+  }
   // DFT (Goertzel recurrence, mirrors DftProbe::dft); band from the job
   // (default 2000..3000 MHz in 101 points).
   const fA = (job.freqs && job.freqs[0]) || 2.0e9;
@@ -932,6 +1288,7 @@ async function coreSolver(job) {
     series: { sumAbsV, sumAbsI, maxAbsV, lastV: V[done - 1], lastI: I[done - 1],
               tailRatio: maxAbsV > 0 ? tailMax / maxAbsV : 0 },
     ezAbsSum, zin,
+    ntff: ntffResults, ntffProbe,
     adapter: adapterSnapshot, when: new Date().toISOString(),
   };
   results.runs.push(result);

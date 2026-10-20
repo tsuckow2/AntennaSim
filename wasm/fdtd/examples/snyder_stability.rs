@@ -10,9 +10,13 @@
 //! enough to localize the mode and measure its growth rate.
 //!
 //! Usage: `cargo run --release --example snyder_stability -- [t_ns]`
-//! Env: SNYDER_STAB_CFL (default 0.2), SNYDER_STAB_EVERY (default 500).
+//! Env: SNYDER_STAB_CFL (default 0.2), SNYDER_STAB_EVERY (default 500),
+//! SNYDER_STAB_CKPT (default ./snyder_stab_ckpt.bin),
+//! SNYDER_STAB_CKPT_EVERY (default 5000). Checkpoints (SSCK1: fields +
+//! CPML psi + step clock, config-guarded) make multi-hour probes
+//! survive VM restarts; the file is removed on completion.
 
-use fdtd::cpml::Cpml;
+use fdtd::cpml::{Cpml, PmlFaceData};
 use fdtd::geometry::{build_snyder, DX, DY, DZ, NX, NY, NZ, X0, Y0, Z0};
 use fdtd::grid::YeeGrid;
 use fdtd::material::Materials;
@@ -24,6 +28,61 @@ use std::time::Instant;
 const NPML: usize = 12;
 const K_GROUND: usize = 31;
 const K_PATCH: usize = 34;
+
+// --- Checkpointing (SSCK1), mirroring snyder_ntff's SNCK1: field
+// arrays + CPML psi + step clock. A 16 ns probe is ~4.5 h of CPU and
+// this VM restarts often enough to kill uncheckpointed attempts;
+// with a dump every CKPT_EVERY steps a restart costs minutes.
+fn put_f32s(buf: &mut Vec<u8>, a: &[f32]) {
+    buf.extend_from_slice(&(a.len() as u64).to_le_bytes());
+    for x in a {
+        buf.extend_from_slice(&x.to_le_bytes());
+    }
+}
+
+struct Rd<'a> {
+    b: &'a [u8],
+    p: usize,
+}
+impl<'a> Rd<'a> {
+    fn u64(&mut self) -> u64 {
+        let v = u64::from_le_bytes(self.b[self.p..self.p + 8].try_into().unwrap());
+        self.p += 8;
+        v
+    }
+    fn f32s(&mut self) -> Vec<f32> {
+        let n = self.u64() as usize;
+        let mut out = Vec::with_capacity(n);
+        for _ in 0..n {
+            out.push(f32::from_le_bytes(self.b[self.p..self.p + 4].try_into().unwrap()));
+            self.p += 4;
+        }
+        out
+    }
+}
+
+fn save_ckpt(path: &str, sim: &Fdtd, step_done: usize, total_steps: usize, cfl: f32, rs: f32) {
+    let mut buf = Vec::new();
+    buf.extend_from_slice(b"SSCK1");
+    buf.extend_from_slice(&(step_done as u64).to_le_bytes());
+    buf.extend_from_slice(&(total_steps as u64).to_le_bytes());
+    buf.extend_from_slice(&(cfl.to_bits() as u64).to_le_bytes());
+    buf.extend_from_slice(&(rs.to_bits() as u64).to_le_bytes());
+    let g = &sim.grid;
+    for a in [&g.ex, &g.ey, &g.ez, &g.hx, &g.hy, &g.hz] {
+        put_f32s(&mut buf, a);
+    }
+    let snap = sim.cpml.snapshot();
+    buf.extend_from_slice(&(snap.len() as u64).to_le_bytes());
+    for f in &snap {
+        for a in [&f.psi_a, &f.psi_b, &f.psi_c, &f.psi_d] {
+            put_f32s(&mut buf, a);
+        }
+    }
+    let tmp = format!("{path}.tmp");
+    std::fs::write(&tmp, &buf).expect("write ckpt");
+    std::fs::rename(&tmp, path).expect("rename ckpt");
+}
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -58,8 +117,66 @@ fn main() {
          feed cell ({fi},{fj},{fk})"
     );
     std::io::stdout().flush().ok();
-    let t0 = Instant::now();
+
+    let ckpt = std::env::var("SNYDER_STAB_CKPT")
+        .unwrap_or_else(|_| "snyder_stab_ckpt.bin".to_string());
+    let ckpt_every: usize = std::env::var("SNYDER_STAB_CKPT_EVERY")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(5000);
     let mut step = 0usize;
+    if let Ok(bytes) = std::fs::read(&ckpt) {
+        let mut rd = Rd { b: &bytes, p: 0 };
+        assert_eq!(&bytes[0..5], b"SSCK1", "ckpt magic");
+        rd.p = 5;
+        let step_done = rd.u64() as usize;
+        let total = rd.u64() as usize;
+        let cfl_ok = rd.u64() == cfl.to_bits() as u64;
+        let rs_ok = rd.u64() == rs.to_bits() as u64;
+        if total == total_steps && cfl_ok && rs_ok && step_done < total_steps {
+            for a in [
+                &mut sim.grid.ex,
+                &mut sim.grid.ey,
+                &mut sim.grid.ez,
+                &mut sim.grid.hx,
+                &mut sim.grid.hy,
+                &mut sim.grid.hz,
+            ] {
+                let v = rd.f32s();
+                assert_eq!(v.len(), a.len(), "ckpt field size");
+                a.copy_from_slice(&v);
+            }
+            let nf = rd.u64() as usize;
+            let mut snap = Vec::with_capacity(nf);
+            for _ in 0..nf {
+                snap.push(PmlFaceData {
+                    axis: 0,
+                    lo: false,
+                    npml: 0,
+                    n1: 0,
+                    n2: 0,
+                    b_e: vec![],
+                    a_e: vec![],
+                    b_h: vec![],
+                    a_h: vec![],
+                    kinv: vec![],
+                    psi_a: rd.f32s(),
+                    psi_b: rd.f32s(),
+                    psi_c: rd.f32s(),
+                    psi_d: rd.f32s(),
+                });
+            }
+            sim.cpml.restore_psi(&snap);
+            sim.restore_clock(step_done);
+            step = step_done;
+            println!("RESUMED from checkpoint at step {step}/{total_steps}");
+            std::io::stdout().flush().ok();
+        } else {
+            println!("ckpt config mismatch; starting fresh");
+            std::io::stdout().flush().ok();
+        }
+    }
+    let t0 = Instant::now();
     loop {
         let ez = &sim.grid.ez;
         let mut abs_sum = 0.0f64;
@@ -136,6 +253,7 @@ fn main() {
         std::io::stdout().flush().ok();
         if step >= total_steps || abs_sum > 1e16 {
             println!("done: step {step}, ezAbsSum={abs_sum:.6e}");
+            std::fs::remove_file(&ckpt).ok();
             break;
         }
         let n = every.min(total_steps - step);
@@ -143,5 +261,8 @@ fn main() {
             sim.step();
         }
         step += n;
+        if step % ckpt_every == 0 {
+            save_ckpt(&ckpt, &sim, step, total_steps, cfl, rs);
+        }
     }
 }

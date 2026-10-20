@@ -260,18 +260,28 @@ impl ResistiveSource {
     /// current, whose feedback gain ω·C_gap·Rs exceeds 1 at grid
     /// frequencies and pumps a discrete resonance (observed ×1.02/step
     /// growth at ω·dt ≈ 0.46 on a 0.381 mm gap cell, at any CFL). The
-    /// Norton form injects the source as an impressed current
-    /// I_src = (Vs − V)/Rs into the cell's natural E update instead:
-    /// explicit negative feedback with gain dt/(C_gap·Rs) ≪ 1, and the
-    /// terminal relation V = Vs − I·Rs holds through the cell dynamics
-    /// (exactly at DC). `cb_src` is the source cell's Cb (= dt/ε),
-    /// used to recover ε for the deposit. Returns V_terminal after the
-    /// deposit; the probe records it with the loop current.
+    /// Norton form injects the source as an impressed current into the
+    /// cell's natural E update instead — but the deposit must be
+    /// SEMI-IMPLICIT: solved against the port voltage it produces.
+    /// The deposit changes the cell voltage by i_src * G with
+    /// G = cb_src * dz / (dx*dy) (= dt/C_gap), so the exact form is
+    /// I_src = (Vs − V) / (Rs + G). The explicit form (divide by Rs
+    /// alone) has feedback gain G/Rs, which is O(1) — not ≪ 1 — for a
+    /// thin vacuum gap cell (0.93 at CFL 0.2, 2.3 at CFL 0.5 for the
+    /// Snyder feed: dt·dz/(ε₀·Rs·dx·dy)) and rings the gap cell
+    /// against its PEC neighbours: the Snyder late-time instability
+    /// (×1.07/step at CFL 0.5, ×1.0006/step at CFL 0.2, Rs-scaling
+    /// verified 2026-10-18). Semi-implicit, the local loop gain is
+    /// Rs/(Rs+G) < 1 at any CFL and V_terminal = Vs − I_src·Rs holds
+    /// exactly for the recorded pair. `cb_src` is the source cell's
+    /// Cb (= dt/ε), used to recover ε for the deposit. Returns
+    /// V_terminal after the deposit.
     pub fn apply_norton(&self, g: &mut YeeGrid, feed: &Feed, vs: f32, dt: f32, cb_src: f32) -> f32 {
         let si = g.ez_idx(feed.src_i, feed.src_j, feed.src_k);
         let dz = g.dz;
         let v_now = -g.ez[si] * dz;
-        let i_src = (vs - v_now) / self.rs;
+        let g_dep = cb_src * dz / (g.dx * g.dy);
+        let i_src = (vs - v_now) / (self.rs + g_dep);
         let eps = dt / cb_src;
         g.ez[si] -= dt * i_src / (eps * g.dx * g.dy);
         -g.ez[si] * dz

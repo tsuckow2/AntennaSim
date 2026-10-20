@@ -591,7 +591,13 @@ fn source_step(@builtin(global_invocation_id) gid: vec3<u32>) {
                + (hy[p.tl_hy_rgt] - hy[p.tl_hy_lft]) * p.dy;
         let si = p.src_ez_idx;
         let v_now = -ez[si] * p.dz;
-        let i_src = (vs - v_now) / p.rs;
+        // Semi-implicit deposit (see ResistiveSource::apply_norton):
+        // the deposit changes the cell voltage by i_src * G with
+        // G = cb_z * dz / (dx*dy); dividing by (rs + G) makes the
+        // feedback gain rs/(rs+G) < 1 at any CFL. The explicit form's
+        // gain G/rs is O(1) for the Snyder gap cell and rings it.
+        let g_dep = cb_z[si] * p.dz / (p.dx * p.dy);
+        let i_src = (vs - v_now) / (p.rs + g_dep);
         let eps_src = p.dt / cb_z[si];
         ez[si] -= p.dt * i_src / (eps_src * p.dx * p.dy);
         v_term = -ez[si] * p.dz;

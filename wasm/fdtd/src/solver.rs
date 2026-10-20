@@ -137,7 +137,26 @@ impl Fdtd {
             let v_port = -(0..span)
                 .map(|m| self.grid.ez[self.grid.ez_idx(si, sj, sk + m)] * dz)
                 .sum::<f32>();
-            let i_src = (vs - v_port) / self.rsource.rs;
+            // Semi-implicit deposit: the impressed current is solved
+            // against the port voltage it produces, not the pre-deposit
+            // voltage. The deposit itself changes the port voltage by
+            // i_src * G, where G = dz * sum(cb_z) / (dx*dy) is the
+            // deposit's own impedance (dt/C_span), so the exact
+            // terminal relation is i_src = (vs - v_port) / (Rs + G).
+            // The explicit form divides by Rs alone: its feedback gain
+            // G/Rs is O(1) for a thin vacuum gap cell (0.93 at CFL 0.2,
+            // 2.3 at CFL 0.5 for the Snyder feed), which rings the gap
+            // cell against its PEC sandwich — the late-time instability
+            // (growth x1.07/step at CFL 0.5, x1.0006/step at CFL 0.2).
+            // With (Rs + G) the local loop gain is Rs/(Rs+G) < 1 at any
+            // CFL and the recorded (V_term, i_src) pair satisfies
+            // V_term = Vs - i_src * Rs exactly.
+            let g_dep: f32 = (0..span)
+                .map(|m| self.mat.cb_z[self.grid.ez_idx(si, sj, sk + m)])
+                .sum::<f32>()
+                * dz
+                / (self.grid.dx * self.grid.dy);
+            let i_src = (vs - v_port) / (self.rsource.rs + g_dep);
             let mut v_term = 0.0f32;
             for m in 0..span {
                 let idx = self.grid.ez_idx(si, sj, sk + m);

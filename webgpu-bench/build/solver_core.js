@@ -713,6 +713,50 @@ async function coreSolver(job) {
   const ez = await readback(bufByBinding[4], S.ez);
   let ezAbsSum = 0;
   for (let i = 0; i < ez.length; i++) ezAbsSum += Math.abs(ez[i]);
+  // Ez diagnostics (v6.2): localize the field mass — argmax cell, the
+  // CPML-shell vs interior split, per-k slab sums, and the top coarse
+  // blocks. Readback-only; the solver kernels are untouched. Built for
+  // the late-time-instability hunt (a localized parasitic mode grows
+  // past ~14 ns in the Snyder configuration).
+  const ezDiag = (() => {
+    const Gd = snyderGeom(cfg.zref3 ? 'zref3' : cfg.zref2 ? 'zref2' : cfg.zref ? 'zref' : '', cfg.cfl);
+    const NPML = 12;
+    let amIdx = 0, amVal = 0, sumPml = 0, sumInt = 0;
+    const kSums = new Float64Array(NZ + 1);
+    const NB = 8, nbx = Math.ceil(NX / NB), nby = Math.ceil(NY / NB), nbk = Math.ceil((NZ + 1) / NB);
+    const blocks = new Float64Array(nbx * nby * nbk);
+    for (let idx = 0; idx < ez.length; idx++) {
+      const a = Math.abs(ez[idx]);
+      if (a > amVal) { amVal = a; amIdx = idx; }
+      const i = idx % NX;
+      const jk = (idx / NX) | 0;
+      const j = jk % NY;
+      const k = (jk / NY) | 0;
+      kSums[k] += a;
+      if (i < NPML || i >= NX - NPML || j < NPML || j >= NY - NPML || k < NPML || k > NZ - NPML) sumPml += a;
+      else sumInt += a;
+      blocks[(((k / NB) | 0) * nby + ((j / NB) | 0)) * nbx + ((i / NB) | 0)] += a;
+    }
+    const ai = amIdx % NX, ajk = (amIdx / NX) | 0, aj = ajk % NY, ak = (ajk / NY) | 0;
+    const top = [...blocks.entries()].sort((p, q) => q[1] - p[1]).slice(0, 8)
+      .map(([b, s]) => ({ b: [b % nbx, ((b / nbx) | 0) % nby, (b / (nbx * nby)) | 0], sum: s }));
+    return {
+      argmax: {
+        ijk: [ai, aj, ak], value: amVal,
+        xyz_mm: [
+          +((Gd.X0 + ai * Gd.DX) * 1e3).toFixed(2),
+          +((Gd.Y0 + (aj + 0.5) * Gd.DY) * 1e3).toFixed(2),
+          +((Gd.Z0 + ak * Gd.DZ) * 1e3).toFixed(2),
+        ],
+        inPml: ai < NPML || ai >= NX - NPML || aj < NPML || aj >= NY - NPML || ak < NPML || ak > NZ - NPML,
+        zBand: ak < Gd.kGround ? 'below-ground' : ak <= Gd.kPatch ? 'substrate' : 'above-patch',
+      },
+      sumPml, sumInt,
+      kSums: [...kSums],
+      topBlocks: top,
+      geom: { kGround: Gd.kGround, kPatch: Gd.kPatch },
+    };
+  })();
   const V = new Float64Array(done), I = new Float64Array(done);
   let sumAbsV = 0, sumAbsI = 0, maxAbsV = 0;
   for (let s = 0; s < done; s++) {
@@ -823,7 +867,7 @@ async function coreSolver(job) {
     checksums: B.checksums,
     series: { sumAbsV, sumAbsI, maxAbsV, lastV: V[done - 1], lastI: I[done - 1],
               tailRatio: maxAbsV > 0 ? tailMax / maxAbsV : 0 },
-    ezAbsSum, zin,
+    ezAbsSum, ezDiag, zin,
     ntff: ntffResults, ntffProbe,
     adapter: adapterSnapshot, when: new Date().toISOString(),
   };

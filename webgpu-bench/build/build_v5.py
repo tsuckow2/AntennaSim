@@ -7,7 +7,7 @@ page = open(os.path.join(HERE, 'template.html')).read()
 shaders = open(os.path.join(HERE, 'solver_shaders.js')).read()
 core = open(os.path.join(HERE, 'solver_core.js')).read()
 assert "const PAGE_VERSION = 'v4';" in page
-page = page.replace("const PAGE_VERSION = 'v4';", "const PAGE_VERSION = 'v6.3';")
+page = page.replace("const PAGE_VERSION = 'v4';", "const PAGE_VERSION = 'v6.7';")
 marker = '// ---------------------------------------------------------------------------\n// Manual job handlers'
 assert marker in page
 page = page.replace(marker, shaders + '\n' + core + '\n' + marker)

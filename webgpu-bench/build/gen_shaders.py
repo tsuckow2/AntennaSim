@@ -18,6 +18,7 @@ for b in [0,2,3,4,5,6,7]: GROUP[b] = 0
 for b in range(8,17): GROUP[b] = 1
 for b in [1,17,18]: GROUP[b] = 2
 for b in [19,20,21]: GROUP[b] = 3
+GROUP[28] = 3  # tangential-damping factor buffer (SHADER_DAMP)
 
 def renumber(wgsl):
     def sub(m):
@@ -54,6 +55,7 @@ def usage(wgsl):
     entries = [n for n in bodies if re.search(r'@compute[^}]*fn %s' % n, wgsl, re.S) or n in
                ('update_hx','update_hy','update_hz','update_ex','update_ey','update_ez',
                 'cpml_e_x','cpml_e_y','cpml_e_z','cpml_h_x','cpml_h_y','cpml_h_z',
+                'damp_ex','damp_ey','damp_ez','damp_hx','damp_hy','damp_hz',
                 'wire_update','wire_deposit','pec_ex','pec_ey','pec_ez','source_step')]
     result = {}
     for e in entries:
@@ -73,7 +75,7 @@ def usage(wgsl):
 
 shaders = {}
 usage_all = {}
-for key, const in [('h','SHADER_H'), ('e','SHADER_E'), ('cpml','SHADER_CPML'), ('misc','SHADER_MISC')]:
+for key, const in [('h','SHADER_H'), ('e','SHADER_E'), ('cpml','SHADER_CPML'), ('damp','SHADER_DAMP'), ('misc','SHADER_MISC')]:
     raw = extract(const)
     shaders[key] = renumber(raw)
     usage_all[key] = usage(raw)

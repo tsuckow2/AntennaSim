@@ -43,6 +43,42 @@ const hxIdx = (i, j, k) => (k * (SNY.NY + 1) + j) * SNY.NX + i;
 const hyIdx = (i, j, k) => (k * SNY.NY + j) * (SNY.NX + 1) + i;
 const hzIdx = (i, j, k) => (k * (SNY.NY + 1) + j) * (SNY.NX + 1) + i;
 
+// Tangential-damping mask variants (job config key dampMode, default
+// 'full' = the v6.4 behaviour). The mask lives entirely in the host
+// factor construction in buildSnyderSolver — the damp WGSL kernels
+// only multiply by the factor buffer. Mirrors gpu.rs DampMode
+// (env CPML_DAMP_MODE).
+//   full:     whole shell damped, σ as graded.
+//   zband:    a shell cell is damped only if the component's own z
+//             index k lies in the slab band [kGround−2, kPatch+2] —
+//             the guided mode's habitat. Applied uniformly by k, so
+//             the z-face shells (their cells' k IS the PML cap depth,
+//             far outside the band) end up undamped, and only the
+//             slab-height rows of the lateral shells are damped.
+//   deep:     σ weighted by interface-depth q = npml−1−p, where p is
+//             the cpml.rs depth index (p = 0 is the OUTERMOST layer):
+//             w = 0 for q < npml/2, then a linear ramp
+//             (q − npml/2 + 1)/(npml/2), so w = 1 at the outer edge —
+//             only the deep half of each shell is damped.
+//   zbanddeep: both restrictions.
+//   zlow:     one-sided band — a shell cell is damped only if its own
+//             k satisfies k ≤ kPatch+2, with NO lower bound. The zband
+//             probe failed because mode 2 also lives in the
+//             below-ground channel (lateral shells, k = 0..kGround),
+//             which zband left undamped; zlow covers it. Applied
+//             uniformly by k: z-face top-cap cells (k ≥ NZ−npml) stay
+//             undamped, bottom-cap cells (k < npml) are damped.
+function dampModeOf(cfg) {
+  const m = cfg && cfg.dampMode;
+  return (m === 'zband' || m === 'deep' || m === 'zbanddeep' || m === 'zlow') ? m : 'full';
+}
+function dampDeepWeight(mode, p, npml) {
+  if (mode !== 'deep' && mode !== 'zbanddeep') return 1;
+  const half = Math.floor(npml / 2);
+  const q = npml - 1 - p;
+  return q < half ? 0 : (q - half + 1) / half;
+}
+
 function buildSnyderSolver(cfg) {
   const G = snyderGeom(cfg.zref3 ? 'zref3' : cfg.zref2 ? 'zref2' : cfg.zref ? 'zref' : '', cfg.cfl);
   const { NX, NY, NZ, DX, DY, DZ, X0, Y0, Z0, EPS0, dt } = G;
@@ -169,14 +205,16 @@ function buildSnyderSolver(cfg) {
   ];
   const coeff = [];
   const faceWords = [];
+  const faceSigmas = [];
   let psiTotal = 0;
   for (const fd of faceDims) {
     const m = 3.0, kappaMax = 7.0, alphaMax = 0.3;
     const sigmaMax = F(F(m + 1) / F(F(150.0 * F(Math.PI)) * fd.delta));
-    const be = [], ae = [], kinv = [];
+    const be = [], ae = [], kinv = [], sig = [];
     for (let p = 0; p < NPML; p++) {
       const rho = F(F(NPML - p) / NPML);
       const sigma = F(sigmaMax * Math.pow(rho, m));
+      sig.push(sigma);
       const kappa = F(1 + F(F(kappaMax - 1) * Math.pow(rho, m)));
       const alpha = F(alphaMax * F(p / NPML));
       const b = F(Math.exp(F(F(-F(F(sigma / kappa) + alpha)) * dt) / EPS0));
@@ -184,11 +222,69 @@ function buildSnyderSolver(cfg) {
         ? F(F(F(b - 1) * sigma) / F(kappa * F(sigma + F(kappa * alpha)))) : 0;
       be.push(b); ae.push(a); kinv.push(F(1 / kappa));
     }
+    faceSigmas.push(sig);
     const coeffBase = coeff.length;
     coeff.push(...be, ...ae, ...be, ...ae, ...kinv); // b_e, a_e, b_h(=b_e), a_h(=a_e), kinv
     const psiBase = psiTotal;
     psiTotal += 4 * NPML * fd.n1 * fd.n2;
     faceWords.push([fd.axis, fd.lo, NPML, fd.n1, fd.n2, psiBase, coeffBase, 0]);
+  }
+  // Tangential damping (CPML mode-2 fix; config key tangentialRatio,
+  // default 0 = off): per-component factor arrays concatenated in
+  // field order, mirroring cpml.rs damp_tangential — a sample at
+  // depth p (from the component's own outermost sample along a face
+  // normal) is scaled by exp(−R·σ_face(p)·dt/ε₀) per owning face;
+  // edge/corner overlaps multiply. Config key dampMode selects the
+  // spatial mask (see dampModeOf): 'full' (default) is the v6.4
+  // behaviour, bit-identical; 'zband'/'deep'/'zbanddeep'/'zlow'
+  // restrict the factors in the construction only.
+  let dampFac = null;
+  const TR = cfg.tangentialRatio || 0;
+  const DMODE = dampModeOf(cfg);
+  if (TR > 0) {
+    const banded = DMODE === 'zband' || DMODE === 'zbanddeep';
+    const zlow = DMODE === 'zlow'; // one-sided: upper edge only
+    const bandLo = kGround - 2, bandHi = kPatch + 2;
+    const compDims = [
+      [NX + 1, NY, NZ], [NX, NY + 1, NZ], [NX, NY, NZ + 1],
+      [NX, NY + 1, NZ + 1], [NX + 1, NY, NZ + 1], [NX + 1, NY + 1, NZ],
+    ];
+    const parts = [];
+    for (const [ni, nj, nk] of compDims) {
+      const fac = new Float32Array(ni * nj * nk).fill(1);
+      faceDims.forEach((fd, fi) => {
+        const sig = faceSigmas[fi];
+        const [na, nb, nc] = fd.axis === 0 ? [ni, nj, nk]
+          : fd.axis === 1 ? [nj, ni, nk] : [nk, ni, nj];
+        for (let a = 0; a < na; a++) {
+          let p;
+          if (fd.lo) { if (a < NPML) p = a; else continue; }
+          else if (a + NPML >= na) p = na - 1 - a; else continue;
+          const wgt = dampDeepWeight(DMODE, p, NPML);
+          // wgt === 1 keeps the exact v6.4 expression (bit-identical
+          // 'full'); the deep branch mirrors gpu.rs's op order
+          // ((−R·w)·σ·dt/ε₀, one f32 rounding per step).
+          const fv = wgt === 1
+            ? F(Math.exp(F(F(F(-TR * sig[p]) * dt) / EPS0)))
+            : F(Math.exp(F(F(F(F(-TR * wgt) * sig[p]) * dt) / EPS0)));
+          if (fv === 1) continue;
+          for (let c = 0; c < nc; c++) {
+            for (let b = 0; b < nb; b++) {
+              const [i, j, k] = fd.axis === 0 ? [a, b, c]
+                : fd.axis === 1 ? [b, a, c] : [b, c, a];
+              if ((banded || zlow) && k > bandHi) continue;
+              if (banded && k < bandLo) continue;
+              const ix = (k * nj + j) * ni + i;
+              fac[ix] = F(fac[ix] * fv);
+            }
+          }
+        }
+      });
+      parts.push(fac);
+    }
+    dampFac = new Float32Array(parts.reduce((s, a) => s + a.length, 0));
+    let off = 0;
+    for (const a of parts) { dampFac.set(a, off); off += a.length; }
   }
   // Gaussian source (2.5 GHz peak, v0 = 1) — GaussianSource::new.
   const tau = F(1 / F(F(F(Math.PI) * F(2.5e9)) * F(Math.SQRT2)));
@@ -222,11 +318,15 @@ function buildSnyderSolver(cfg) {
     checksums['pec_' + 'xyz'[c]] = cnt;
   }
   checksums.coeff = wsum(Float32Array.from(coeff));
+  if (dampFac) {
+    checksums.dampFac = wsum(dampFac);
+    checksums.dampFacLen = dampFac.length;
+  }
   checksums.psiLen = psiTotal;
   checksums.srcCell = [pcI, pcJ, kSrc];
   checksums.dt = dt;
   return {
-    ca, cb, pec, coeff: Float32Array.from(coeff), psiLen: psiTotal,
+    ca, cb, pec, coeff: Float32Array.from(coeff), psiLen: psiTotal, dampFac,
     faceWords, params, checksums,
     dims: { NX, NY, NZ, dt },
     sizes: { ex: nEx, ey: nEy, ez: nEz, hx: NX * (NY + 1) * (NZ + 1), hy: (NX + 1) * NY * (NZ + 1), hz: (NX + 1) * (NY + 1) * NZ },
@@ -507,12 +607,14 @@ function ntffBoxFlux(acc, geom, nsamp, fi, steps) {
 // Solver runner: builds buffers + pipelines from SOLVER_SHADERS/SOLVER_USAGE
 // (one minimal bind-group layout per entry point), then steps in the exact
 // native order (gpu.rs GpuFdtd::run): H, CPML-H (face order), wire_update,
-// E, CPML-E, wire_deposit, PEC, source. Chunks of 64 steps per submission.
+// E, CPML-E, tangential damping (only when config.tangentialRatio > 0),
+// wire_deposit, PEC, source. Chunks of 64 steps per submission.
 // ---------------------------------------------------------------------------
 const SOLVER_ENTRIES = {
   h: ['update_hx', 'update_hy', 'update_hz'],
   e: ['update_ex', 'update_ey', 'update_ez'],
   cpml: ['cpml_e_x', 'cpml_e_y', 'cpml_e_z', 'cpml_h_x', 'cpml_h_y', 'cpml_h_z'],
+  damp: ['damp_ex', 'damp_ey', 'damp_ez', 'damp_hx', 'damp_hy', 'damp_hz'],
   misc: ['wire_update', 'wire_deposit', 'pec_ex', 'pec_ey', 'pec_ez', 'source_step'],
   ntff: ['ntff_accum_e', 'ntff_accum_h', 'ntff_far'],
 };
@@ -520,9 +622,10 @@ const BINDING_GROUP = b => (b === 0 || (b >= 2 && b <= 7)) ? 0 : (b >= 8 && b <=
 
 async function coreSolver(job) {
   const cfg = Object.assign({ post: true, thick: true }, job.config || {});
+  cfg.dampMode = dampModeOf(cfg); // effective mode; lands in result.config
   const steps = job.steps || 1000;
   const chunkMax = job.chunk || 64;
-  log(`Solver job: Snyder post=${cfg.post} thick=${cfg.thick}, ${steps} steps — building geometry…`);
+  log(`Solver job: Snyder post=${cfg.post} thick=${cfg.thick} tangentialR=${cfg.tangentialRatio || 0} dampMode=${cfg.dampMode}, ${steps} steps — building geometry…`);
   const tBuild = performance.now();
   const B = buildSnyderSolver(cfg);
   log(`Geometry built in ${((performance.now() - tBuild) / 1000).toFixed(1)} s. src cell ${B.checksums.srcCell}, dt=${B.checksums.dt.toExponential(4)}`);
@@ -554,6 +657,10 @@ async function coreSolver(job) {
   bufByBinding[19] = putBuf('wire', new Float32Array(4), usageRW);
   bufByBinding[20] = putBuf('state', new Uint32Array(4), usageRW);
   bufByBinding[21] = mkBuf('record', 3 * steps * 4, usageRW);
+  // Tangential damping factors (binding 28, group 3) — present only
+  // when config.tangentialRatio > 0.
+  const DAMP = !!B.dampFac;
+  if (DAMP) bufByBinding[28] = putBuf('damp_fac', B.dampFac, usageRO);
   const paramsBuf = mkBuf('params', 128, GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST);
   device.queue.writeBuffer(paramsBuf, 0, paramsBytes(B.params));
   bufByBinding[0] = paramsBuf;
@@ -609,6 +716,7 @@ async function coreSolver(job) {
   const pipes = {};
   for (const [key, entries] of Object.entries(SOLVER_ENTRIES)) {
     if (key === 'ntff' && !NT) continue; // NTFF buffers exist only for ntff jobs
+    if (key === 'damp' && !DAMP) continue; // damp buffer exists only when R > 0
     for (const entry of entries) {
       const names = SOLVER_USAGE[key][entry];
       const groupLayouts = [], groupEntries = [[], [], [], []];
@@ -678,6 +786,14 @@ async function coreSolver(job) {
       setP(pass, 'update_ey'); disp(pass, dimsE[1]);
       setP(pass, 'update_ez'); disp(pass, dimsE[2]);
       for (let fi = 0; fi < 6; fi++) { setP(pass, 'cpml_e_' + 'xyz'[B.faceWords[fi][0]], fi); disp(pass, faceDisp[fi]); }
+      if (DAMP) {
+        setP(pass, 'damp_ex'); disp(pass, dimsE[0]);
+        setP(pass, 'damp_ey'); disp(pass, dimsE[1]);
+        setP(pass, 'damp_ez'); disp(pass, dimsE[2]);
+        setP(pass, 'damp_hx'); disp(pass, dimsH[0]);
+        setP(pass, 'damp_hy'); disp(pass, dimsH[1]);
+        setP(pass, 'damp_hz'); disp(pass, dimsH[2]);
+      }
       setP(pass, 'wire_deposit'); pass.dispatchWorkgroups(1, 1, 1);
       setP(pass, 'pec_ex'); disp(pass, pecDisp[0]);
       setP(pass, 'pec_ey'); disp(pass, pecDisp[1]);

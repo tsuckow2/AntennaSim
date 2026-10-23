@@ -5,7 +5,8 @@
 //!
 //! ```text
 //! update_h → CPML-H (faces xlo,xhi,ylo,yhi,zlo,zhi) → wire current
-//! → update_e → CPML-E (same face order) → wire deposit → PEC
+//! → update_e → CPML-E (same face order) → tangential damping
+//! (only when R > 0) → wire deposit → PEC
 //! → resistive source + V/I probe
 //! ```
 //!
@@ -326,7 +327,7 @@ fn cpml_e_y(@builtin(global_invocation_id) gid: vec3<u32>) {
     let ps = b * psi[pa] + a * dhzdy;
     psi[pa] = ps;
     let ei = ex_idx(i, je, k);
-    ex[ei] += cb_x[ei] * (-omk * dhzdy + ps);
+    ex[ei] += cb_x[ei] * (omk * dhzdy - ps);
     let hx_lo = select(0.0, hx[hx_idx(i, je - 1u, k)], je > 0u);
     let dhxdy = (hx[hx_idx(i, je, k)] - hx_lo) / p.dy;
     let pb = psi_b(pi);
@@ -438,6 +439,98 @@ fn cpml_h_z(@builtin(global_invocation_id) gid: vec3<u32>) {
     psi[pd] = ps2;
     let hi2 = hy_idx(i, j, kh);
     hy[hi2] -= p.ch * (omk * dexdz - ps2);
+}
+"#;
+
+// ---------------------------------------------------------------------------
+// WGSL: tangential damping (transcription of cpml.rs damp_tangential,
+// the CPML mode-2 fix). One flat factor per field sample, precomputed
+// on the host (see damp_factor_buffer) and concatenated in field
+// order (ex, ey, ez, hx, hy, hz), each segment in its component's own
+// layout; the kernels recover the segment base from the grid dims.
+// Runs once per step right after CPML-E, mirroring Fdtd::step. The
+// pipelines exist only when R > 0, so R = 0 is bit-identical.
+// ---------------------------------------------------------------------------
+
+const SHADER_DAMP: &str = r#"
+struct Params {
+    nx: u32, ny: u32, nz: u32, _pad0: u32,
+    dx: f32, dy: f32, dz: f32, dt: f32,
+    ch: f32, idx: f32, idy: f32, idz: f32,
+    rs: f32, src_ez_idx: u32, has_wire: u32, _pad1: u32,
+    tl_hx_bot: u32, tl_hx_top: u32, tl_hy_lft: u32, tl_hy_rgt: u32,
+    wire_ez_base: u32, wire_ez_stride: u32, wire_nseg: u32, wire_nnodes: u32,
+    wire_top_pec: u32, wire_dt_over_l: f32, wire_cap: f32, wire_deposit: f32,
+    src_v0: f32, src_t0: f32, src_tau: f32, _pad2: u32,
+};
+@group(0) @binding(0) var<uniform> p: Params;
+@group(0) @binding(2) var<storage, read_write> ex: array<f32>;
+@group(0) @binding(3) var<storage, read_write> ey: array<f32>;
+@group(0) @binding(4) var<storage, read_write> ez: array<f32>;
+@group(0) @binding(5) var<storage, read_write> hx: array<f32>;
+@group(0) @binding(6) var<storage, read_write> hy: array<f32>;
+@group(0) @binding(7) var<storage, read_write> hz: array<f32>;
+@group(0) @binding(28) var<storage, read> damp_fac: array<f32>;
+
+fn ex_idx(i: u32, j: u32, k: u32) -> u32 { return (k * p.ny + j) * (p.nx + 1u) + i; }
+fn ey_idx(i: u32, j: u32, k: u32) -> u32 { return (k * (p.ny + 1u) + j) * p.nx + i; }
+fn ez_idx(i: u32, j: u32, k: u32) -> u32 { return (k * p.ny + j) * p.nx + i; }
+fn hx_idx(i: u32, j: u32, k: u32) -> u32 { return (k * (p.ny + 1u) + j) * p.nx + i; }
+fn hy_idx(i: u32, j: u32, k: u32) -> u32 { return (k * p.ny + j) * (p.nx + 1u) + i; }
+fn hz_idx(i: u32, j: u32, k: u32) -> u32 { return (k * (p.ny + 1u) + j) * (p.nx + 1u) + i; }
+
+fn n_ex() -> u32 { return (p.nx + 1u) * p.ny * p.nz; }
+fn n_ey() -> u32 { return p.nx * (p.ny + 1u) * p.nz; }
+fn n_ez() -> u32 { return p.nx * p.ny * (p.nz + 1u); }
+fn n_hx() -> u32 { return p.nx * (p.ny + 1u) * (p.nz + 1u); }
+fn n_hy() -> u32 { return (p.nx + 1u) * p.ny * (p.nz + 1u); }
+
+@compute @workgroup_size(8, 8, 4)
+fn damp_ex(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let i = gid.x; let j = gid.y; let k = gid.z;
+    if (i > p.nx || j >= p.ny || k >= p.nz) { return; }
+    let e = ex_idx(i, j, k);
+    ex[e] *= damp_fac[e];
+}
+
+@compute @workgroup_size(8, 8, 4)
+fn damp_ey(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let i = gid.x; let j = gid.y; let k = gid.z;
+    if (i >= p.nx || j > p.ny || k >= p.nz) { return; }
+    let e = ey_idx(i, j, k);
+    ey[e] *= damp_fac[n_ex() + e];
+}
+
+@compute @workgroup_size(8, 8, 4)
+fn damp_ez(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let i = gid.x; let j = gid.y; let k = gid.z;
+    if (i >= p.nx || j >= p.ny || k > p.nz) { return; }
+    let e = ez_idx(i, j, k);
+    ez[e] *= damp_fac[n_ex() + n_ey() + e];
+}
+
+@compute @workgroup_size(8, 8, 4)
+fn damp_hx(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let i = gid.x; let j = gid.y; let k = gid.z;
+    if (i >= p.nx || j > p.ny || k > p.nz) { return; }
+    let e = hx_idx(i, j, k);
+    hx[e] *= damp_fac[n_ex() + n_ey() + n_ez() + e];
+}
+
+@compute @workgroup_size(8, 8, 4)
+fn damp_hy(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let i = gid.x; let j = gid.y; let k = gid.z;
+    if (i > p.nx || j >= p.ny || k > p.nz) { return; }
+    let e = hy_idx(i, j, k);
+    hy[e] *= damp_fac[n_ex() + n_ey() + n_ez() + n_hx() + e];
+}
+
+@compute @workgroup_size(8, 8, 4)
+fn damp_hz(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let i = gid.x; let j = gid.y; let k = gid.z;
+    if (i > p.nx || j > p.ny || k >= p.nz) { return; }
+    let e = hz_idx(i, j, k);
+    hz[e] *= damp_fac[n_ex() + n_ey() + n_ez() + n_hx() + n_hy() + e];
 }
 "#;
 
@@ -644,6 +737,9 @@ pub struct GpuFdtd {
     pipe_wire_deposit: wgpu::ComputePipeline,
     pipe_pec: [wgpu::ComputePipeline; 3],
     pipe_source: wgpu::ComputePipeline,
+    /// Tangential-damping pipelines (ex, ey, ez, hx, hy, hz);
+    /// `Some` only when the CPML tangential ratio R > 0.
+    pipe_damp: Option<[wgpu::ComputePipeline; 6]>,
     faces: Vec<FaceDispatch>,
     /// Workgroup counts per component kernel (8,8,4) groups.
     dims_e: [(u32, u32, u32); 3],
@@ -665,6 +761,181 @@ fn wg(n: u32) -> u32 {
     n.div_ceil(256)
 }
 
+/// Tangential-damping spatial mask variants (env `CPML_DAMP_MODE`,
+/// default `"full"`; mirrors the bench page's `dampMode` job config
+/// key). The mask lives entirely in the host factor construction —
+/// the damp WGSL kernels only multiply by the factor buffer.
+///
+/// - `Full`: the original behaviour — whole shell, σ as graded.
+/// - `ZBand`: a shell cell is damped only if the component's own z
+///   index k lies in the slab band `[k_ground−2, k_patch+2]` (the
+///   guided mode's habitat; band passed in by the caller, derived
+///   from the geometry). Applied uniformly by k, so the z-face shells
+///   (their cells' k IS the PML cap depth, far outside the band) end
+///   up undamped and only the slab-height rows of the lateral shells
+///   are damped.
+/// - `Deep`: σ weighted by interface-depth q = npml−1−p (p is the
+///   cpml.rs depth index: p = 0 is the OUTERMOST layer): w = 0 for
+///   q < npml/2, then a linear ramp `(q − npml/2 + 1)/(npml/2)`, so
+///   w = 1 at the outer edge — only the deep half of each shell is
+///   damped.
+/// - `ZBandDeep`: both restrictions.
+/// - `ZLow`: one-sided band — a shell cell is damped only if its own
+///   k satisfies `k ≤ k_patch+2`, with NO lower bound. The `ZBand`
+///   probe failed because the guided mode also lives in the
+///   below-ground channel (the lateral shells at `k < k_ground`),
+///   which the two-sided band left undamped; `ZLow` covers it.
+///   Applied uniformly by k: z-face top-cap cells (large k) stay
+///   undamped, bottom-cap cells (small k) are damped.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum DampMode {
+    Full,
+    ZBand,
+    Deep,
+    ZBandDeep,
+    ZLow,
+}
+
+impl DampMode {
+    fn from_env() -> DampMode {
+        match std::env::var("CPML_DAMP_MODE").as_deref() {
+            Ok("zband") => DampMode::ZBand,
+            Ok("deep") => DampMode::Deep,
+            Ok("zbanddeep") => DampMode::ZBandDeep,
+            Ok("zlow") => DampMode::ZLow,
+            _ => DampMode::Full,
+        }
+    }
+
+    fn banded(self) -> bool {
+        matches!(self, DampMode::ZBand | DampMode::ZBandDeep)
+    }
+
+    /// Modes whose mask consults the caller's slab band (`ZLow` uses
+    /// only its upper edge).
+    fn uses_band(self) -> bool {
+        self.banded() || matches!(self, DampMode::ZLow)
+    }
+
+    /// Deep-mode σ weight at cpml.rs depth p of an npml-deep face
+    /// (see the enum docs). 1.0 when the mode has no deep weighting.
+    fn weight(self, p: usize, npml: usize) -> f32 {
+        if !matches!(self, DampMode::Deep | DampMode::ZBandDeep) {
+            return 1.0;
+        }
+        let half = npml / 2;
+        let q = npml - 1 - p;
+        if q < half {
+            0.0
+        } else {
+            (q - half + 1) as f32 / half as f32
+        }
+    }
+}
+
+/// Per-component tangential-damping factors, concatenated in field
+/// order (ex, ey, ez, hx, hy, hz), each segment in its component's
+/// own layout. Host mirror of cpml.rs `damp_tangential` /
+/// `damp_component`: a sample at depth p (measured from the
+/// component's own outermost sample along a face normal, exactly as
+/// the CPU measures it) is scaled by `exp(−R·σ_face(p)·dt/ε₀)` per
+/// owning face; edge/corner overlaps multiply (conductivities add).
+/// `mode`/`band` apply the DampMode mask in this construction only:
+/// the deep weighting scales σ per depth (w = 1 ⇒ bit-identical to
+/// the `Full` factors), and the band skips cells whose own k index
+/// falls outside `band` (inclusive) when it is `Some` — except
+/// `ZLow`, which consults only the band's upper edge.
+/// The one rounding deviation from the CPU path: the CPU multiplies
+/// the field by each face's factor in sequence, the GPU multiplies
+/// once by the precomputed product — same class of f32 noise the
+/// backend already accepts (FMA contraction, `exp`). Returns `None`
+/// when R = 0 (no buffer, no pipelines, no dispatch: bit-identical).
+fn damp_factor_buffer(
+    faces: &[PmlFaceData],
+    nx: usize,
+    ny: usize,
+    nz: usize,
+    dt: f32,
+    ratio: f32,
+    mode: DampMode,
+    band: Option<(usize, usize)>,
+) -> Option<Vec<f32>> {
+    if ratio == 0.0 {
+        return None;
+    }
+    // cpml.rs's ε₀ literal (the crate's EPS0 above differs in the
+    // last digits and is only used for the wire deposit constant).
+    let eps0 = 8.854_187_817e-12f32;
+    // Component array dims (ni, nj, nk), field order.
+    let comp_dims = [
+        (nx + 1, ny, nz),
+        (nx, ny + 1, nz),
+        (nx, ny, nz + 1),
+        (nx, ny + 1, nz + 1),
+        (nx + 1, ny, nz + 1),
+        (nx + 1, ny + 1, nz),
+    ];
+    let mut out: Vec<f32> = Vec::new();
+    for &(ni, nj, nk) in &comp_dims {
+        let mut fac = vec![1.0f32; ni * nj * nk];
+        for f in faces {
+            let factors: Vec<f32> = f
+                .sigma
+                .iter()
+                .enumerate()
+                .map(|(p, s)| (-ratio * mode.weight(p, f.npml) * s * dt / eps0).exp())
+                .collect();
+            // (na, nb, nc): the shell axis first, then the two
+            // transverse axes in (i, j, k) order — as damp_component.
+            let (na, nb, nc) = match f.axis {
+                0 => (ni, nj, nk),
+                1 => (nj, ni, nk),
+                _ => (nk, ni, nj),
+            };
+            for a in 0..na {
+                let p = if f.lo {
+                    if a < f.npml {
+                        a
+                    } else {
+                        continue;
+                    }
+                } else if a + f.npml >= na {
+                    na - 1 - a
+                } else {
+                    continue;
+                };
+                let fv = factors[p];
+                if fv == 1.0 {
+                    continue;
+                }
+                for c in 0..nc {
+                    for b in 0..nb {
+                        let (i, j, k) = match f.axis {
+                            0 => (a, b, c),
+                            1 => (b, a, c),
+                            _ => (b, c, a),
+                        };
+                        // Z-mask: the cell's own k index (for a
+                        // z-face that is the depth coordinate a itself,
+                        // which lies in the PML caps, outside the band).
+                        // ZLow is one-sided: no lower edge.
+                        if mode.uses_band() {
+                            if let Some((k0, k1)) = band {
+                                if (mode != DampMode::ZLow && k < k0) || k > k1 {
+                                    continue;
+                                }
+                            }
+                        }
+                        fac[(k * nj + j) * ni + i] *= fv;
+                    }
+                }
+            }
+        }
+        out.extend_from_slice(&fac);
+    }
+    Some(out)
+}
+
 fn bentry<'a>(binding: u32, buf: &'a wgpu::Buffer) -> wgpu::BindGroupEntry<'a> {
     wgpu::BindGroupEntry {
         binding,
@@ -677,6 +948,13 @@ impl GpuFdtd {
     /// `total_steps` sizes the on-device V/I record buffer.
     /// Returns `None` if no GPU adapter is available.
     pub async fn try_new(sim: &Fdtd, total_steps: usize) -> Option<GpuFdtd> {
+        // Phase 3a is CPU-only: the GPU kernels implement the
+        // correction form, so running one under CPML_FORM=ade
+        // would silently compute the wrong operator.
+        assert!(
+            !sim.cpml.ade_enabled(),
+            "CPML_FORM=ade is not supported by the GPU backend (phase 3a is CPU-only)"
+        );
         let g = &sim.grid;
         let (nx, ny, nz) = (g.nx, g.ny, g.nz);
         let dt = sim.dt;
@@ -868,6 +1146,55 @@ impl GpuFdtd {
             contents: bytemuck::cast_slice(&pec32(&sim.mat.pec_z)),
             usage: ro,
         });
+        // Tangential damping factors (binding 28); a 1-word dummy
+        // keeps the shared bind group valid when R = 0 (no damp
+        // pipelines are created then, so it is never read).
+        let damp_mode = DampMode::from_env();
+        // Slab band for the banded modes, derived from the Ex PEC
+        // sheets: in the Snyder geometry the ground sheet (k_ground)
+        // and the patch (k_patch) are the only Ex PEC layers, so the
+        // band is their k-extent widened by 2 cells on each side —
+        // the slab layer the CPML guided mode lives in. (Mirrors the
+        // bench builder's [kGround−2, kPatch+2] from its geometry
+        // values.) None if no Ex PEC layer exists (banded modes then
+        // degrade to their unbanded form).
+        let damp_band = if damp_mode.uses_band() {
+            let layer_len = (nx + 1) * ny;
+            let mut klo: Option<usize> = None;
+            let mut khi = 0usize;
+            for k in 0..nz {
+                if sim.mat.pec_x[k * layer_len..(k + 1) * layer_len]
+                    .iter()
+                    .any(|&v| v != 0)
+                {
+                    if klo.is_none() {
+                        klo = Some(k);
+                    }
+                    khi = k;
+                }
+            }
+            klo.map(|lo| (lo.saturating_sub(2), khi + 2))
+        } else {
+            None
+        };
+        let damp_factors = damp_factor_buffer(
+            &faces_data,
+            nx,
+            ny,
+            nz,
+            dt,
+            sim.cpml.tangential_ratio(),
+            damp_mode,
+            damp_band,
+        );
+        let damp_fac_buf = match &damp_factors {
+            Some(v) => matb("damp_fac", v),
+            None => device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("damp_fac_dummy"),
+                contents: bytemuck::cast_slice(&[0.0f32]),
+                usage: ro,
+            }),
+        };
         let coeff_buf = matb("cpml_coeff", &coeff);
         let psi_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("cpml_psi"),
@@ -943,6 +1270,7 @@ impl GpuFdtd {
                 entry(19, stor(false)),
                 entry(20, stor(false)),
                 entry(21, stor(false)),
+                entry(28, stor(true)),
             ],
         });
         let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -980,6 +1308,7 @@ impl GpuFdtd {
                 bentry(19, &wire_buf),
                 bentry(20, &state_buf),
                 bentry(21, &record_buf),
+                bentry(28, &damp_fac_buf),
             ],
         });
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -1027,6 +1356,16 @@ impl GpuFdtd {
             mk(SHADER_MISC, "pec_ez"),
         ];
         let pipe_source = mk(SHADER_MISC, "source_step");
+        let pipe_damp = damp_factors.as_ref().map(|_| {
+            [
+                mk(SHADER_DAMP, "damp_ex"),
+                mk(SHADER_DAMP, "damp_ey"),
+                mk(SHADER_DAMP, "damp_ez"),
+                mk(SHADER_DAMP, "damp_hx"),
+                mk(SHADER_DAMP, "damp_hy"),
+                mk(SHADER_DAMP, "damp_hz"),
+            ]
+        });
 
         Some(GpuFdtd {
             device,
@@ -1045,6 +1384,7 @@ impl GpuFdtd {
             pipe_wire_deposit,
             pipe_pec,
             pipe_source,
+            pipe_damp,
             faces,
             dims_e: [
                 wg3(nx as u32 + 1, ny as u32, nz as u32),
@@ -1146,6 +1486,29 @@ impl GpuFdtd {
                         pass.set_pipeline(&self.pipe_ce[f.axis as usize]);
                         pass.set_bind_group(0, &self.bg, &[(fi as u64 * FACE_SLOT_BYTES) as u32]);
                         pass.dispatch_workgroups(f.disp.0, f.disp.1, f.disp.2);
+                    }
+                    // Tangential damping (CPML mode-2 fix), CPU
+                    // position: right after CPML-E, before the wire
+                    // deposit. Absent entirely when R = 0.
+                    if let Some(pd) = &self.pipe_damp {
+                        for c in 0..3 {
+                            pass.set_pipeline(&pd[c]);
+                            pass.set_bind_group(0, &self.bg, &[0]);
+                            pass.dispatch_workgroups(
+                                self.dims_e[c].0,
+                                self.dims_e[c].1,
+                                self.dims_e[c].2,
+                            );
+                        }
+                        for c in 0..3 {
+                            pass.set_pipeline(&pd[3 + c]);
+                            pass.set_bind_group(0, &self.bg, &[0]);
+                            pass.dispatch_workgroups(
+                                self.dims_h[c].0,
+                                self.dims_h[c].1,
+                                self.dims_h[c].2,
+                            );
+                        }
                     }
                     // wire deposit, PEC, source + probe
                     pass.set_pipeline(&self.pipe_wire_deposit);

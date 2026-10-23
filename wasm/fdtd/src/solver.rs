@@ -5,7 +5,7 @@
 
 use rayon::prelude::*;
 
-use crate::cpml::Cpml;
+use crate::cpml::{ade_terms, AdeCpml, Cpml};
 use crate::grid::YeeGrid;
 use crate::material::Materials;
 use crate::source::{DftProbe, Feed, GaussianSource, ResistiveSource};
@@ -85,8 +85,17 @@ impl Fdtd {
     /// Without a wire, the lumped port uses the Norton form below.
     pub fn step(&mut self) {
         let dt = self.dt;
-        update_h(&mut self.grid, dt);
-        self.cpml.correct_h(&mut self.grid, dt);
+        // Phase 3a (env CPML_FORM=ade): the ADE branch folds the
+        // CPML stretching into the update loops and skips the
+        // face-local correction passes. The correction-form
+        // branch is the production default and is unchanged.
+        if self.cpml.ade_enabled() {
+            let ade = self.cpml.ade_mut().expect("ade form without state");
+            update_h_ade(&mut self.grid, dt, ade);
+        } else {
+            update_h(&mut self.grid, dt);
+            self.cpml.correct_h(&mut self.grid, dt);
+        }
 
         // Source voltage at the E-step time level (used by both paths).
         let vs_next = self.source.value(self.t + dt);
@@ -100,9 +109,17 @@ impl Fdtd {
             (self.feed.measure_i_tight(&self.grid), 0.0)
         };
 
-        update_e(&mut self.grid, &self.mat);
-        self.cpml
-            .correct_e(&mut self.grid, &self.mat.cb_x, &self.mat.cb_y, &self.mat.cb_z);
+        if self.cpml.ade_enabled() {
+            let ade = self.cpml.ade_mut().expect("ade form without state");
+            update_e_ade(&mut self.grid, &self.mat, ade);
+        } else {
+            update_e(&mut self.grid, &self.mat);
+            self.cpml
+                .correct_e(&mut self.grid, &self.mat.cb_x, &self.mat.cb_y, &self.mat.cb_z);
+        }
+        // Tangential-damping prototype (no-op unless
+        // CPML_TANGENTIAL_RATIO is set; see cpml.rs).
+        self.cpml.damp_tangential(&mut self.grid, dt);
 
         // Thin-wire: deposit I^{n+1/2} into E^{n+1} as a current source.
         if let Some(ref tw) = self.thin_wire {
@@ -212,6 +229,43 @@ impl Fdtd {
 /// Standard Yee update (no thin-wire H correction; the Holland/Simpson wire
 /// couples via the E-field, not via modified H updates).
 pub fn update_h(g: &mut YeeGrid, dt: f32) {
+    update_h_impl::<false>(g, dt, &mut None);
+}
+
+/// Phase-3a ADE form of `update_h` (env CPML_FORM=ade): the CPML
+/// stretching is folded into the update — each difference inside
+/// a shell is replaced by (1/κ)·d + ψ with ψ advanced at the same
+/// site (see `AdeCpml`). Algebraically the correction form's
+/// operator; used only on the ADE branch of `Fdtd::step`.
+pub fn update_h_ade(g: &mut YeeGrid, dt: f32, ade: &mut AdeCpml) {
+    update_h_impl::<true>(g, dt, &mut Some(ade));
+}
+
+/// Phase-3a ADE hook for the update loops: with ADE off this is
+/// the identity and the const-generic branch folds away (the
+/// production update is unchanged); with ADE on it advances the
+/// term's ψ at the addressed shell point and returns the
+/// stretched derivative (1/κ)·d + ψ. `m` is the component index
+/// along the derivative axis, `trans` the component's transverse
+/// flat index (see `AdeTerm`'s slot layout).
+#[inline(always)]
+fn stretch<const ADE: bool>(
+    ade: &mut Option<&mut AdeCpml>,
+    term: usize,
+    m: usize,
+    trans: usize,
+    d: f32,
+) -> f32 {
+    if ADE {
+        ade.as_deref_mut()
+            .expect("ADE update without ADE state")
+            .stretch(term, m, trans, d)
+    } else {
+        d
+    }
+}
+
+fn update_h_impl<const ADE: bool>(g: &mut YeeGrid, dt: f32, ade: &mut Option<&mut AdeCpml>) {
     let mu0 = 4.0e-7 * std::f32::consts::PI;
     let c = dt / mu0;
     let (nx, ny, nz) = (g.nx, g.ny, g.nz);
@@ -249,7 +303,9 @@ pub fn update_h(g: &mut YeeGrid, dt: f32) {
                     0.0
                 };
                 let hx_idx = g.hx_idx(i, j, k);
-                g.hx[hx_idx] -= c * ((ey_kp - ey_k) * idz - (ez_jp - ez_j) * idy);
+                let d1 = stretch::<ADE>(ade, ade_terms::HX_Z, k, j * nx + i, (ey_kp - ey_k) * idz);
+                let d2 = stretch::<ADE>(ade, ade_terms::HX_Y, j, k * nx + i, (ez_jp - ez_j) * idy);
+                g.hx[hx_idx] -= c * (d1 - d2);
             }
         }
     }
@@ -282,7 +338,9 @@ pub fn update_h(g: &mut YeeGrid, dt: f32) {
                     0.0
                 };
                 let hy_idx = g.hy_idx(i, j, k);
-                g.hy[hy_idx] -= c * ((ez_ip - ez_i) * idx - (ex_kp - ex_k) * idz);
+                let d1 = stretch::<ADE>(ade, ade_terms::HY_X, i, k * ny + j, (ez_ip - ez_i) * idx);
+                let d2 = stretch::<ADE>(ade, ade_terms::HY_Z, k, j * (nx + 1) + i, (ex_kp - ex_k) * idz);
+                g.hy[hy_idx] -= c * (d1 - d2);
             }
         }
     }
@@ -306,13 +364,25 @@ pub fn update_h(g: &mut YeeGrid, dt: f32) {
                     0.0
                 };
                 let hz_idx = g.hz_idx(i, j, k);
-                g.hz[hz_idx] -= c * ((ex_jp - ex_j) * idy - (ey_ip - ey_i) * idx);
+                let d1 = stretch::<ADE>(ade, ade_terms::HZ_Y, j, k * (nx + 1) + i, (ex_jp - ex_j) * idy);
+                let d2 = stretch::<ADE>(ade, ade_terms::HZ_X, i, k * (ny + 1) + j, (ey_ip - ey_i) * idx);
+                g.hz[hz_idx] -= c * (d1 - d2);
             }
         }
     }
 }
 
 pub fn update_e(g: &mut YeeGrid, m: &Materials) {
+    update_e_impl::<false>(g, m, &mut None);
+}
+
+/// Phase-3a ADE form of `update_e` (env CPML_FORM=ade); see
+/// `update_h_ade`.
+pub fn update_e_ade(g: &mut YeeGrid, m: &Materials, ade: &mut AdeCpml) {
+    update_e_impl::<true>(g, m, &mut Some(ade));
+}
+
+fn update_e_impl<const ADE: bool>(g: &mut YeeGrid, m: &Materials, ade: &mut Option<&mut AdeCpml>) {
     let (nx, ny, nz) = (g.nx, g.ny, g.nz);
     let idx = 1.0 / g.dx;
     let idy = 1.0 / g.dy;
@@ -342,7 +412,9 @@ pub fn update_e(g: &mut YeeGrid, m: &Materials) {
                 let ca = m.ca_x[ex_idx];
                 let cb = m.cb_x[ex_idx];
                 // (∇×H)_x = ∂Hy/∂z - ∂Hz/∂y
-                g.ex[ex_idx] = ca * g.ex[ex_idx] + cb * ((hy_k - hy_km) * idz - (hz_j - hz_jm) * idy);
+                let d1 = stretch::<ADE>(ade, ade_terms::EX_Z, k, j * (nx + 1) + i, (hy_k - hy_km) * idz);
+                let d2 = stretch::<ADE>(ade, ade_terms::EX_Y, j, k * (nx + 1) + i, (hz_j - hz_jm) * idy);
+                g.ex[ex_idx] = ca * g.ex[ex_idx] + cb * (d1 - d2);
             }
         }
     }
@@ -369,7 +441,9 @@ pub fn update_e(g: &mut YeeGrid, m: &Materials) {
                 let ca = m.ca_y[ey_idx];
                 let cb = m.cb_y[ey_idx];
                 // (∇×H)_y = ∂Hz/∂x - ∂Hx/∂z
-                g.ey[ey_idx] = ca * g.ey[ey_idx] + cb * ((hz_i - hz_im) * idx - (hx_k - hx_km) * idz);
+                let d1 = stretch::<ADE>(ade, ade_terms::EY_X, i, k * (ny + 1) + j, (hz_i - hz_im) * idx);
+                let d2 = stretch::<ADE>(ade, ade_terms::EY_Z, k, j * nx + i, (hx_k - hx_km) * idz);
+                g.ey[ey_idx] = ca * g.ey[ey_idx] + cb * (d1 - d2);
             }
         }
     }
@@ -396,7 +470,9 @@ pub fn update_e(g: &mut YeeGrid, m: &Materials) {
                 let ca = m.ca_z[ez_idx];
                 let cb = m.cb_z[ez_idx];
                 // (∇×H)_z = ∂Hx/∂y - ∂Hy/∂x
-                g.ez[ez_idx] = ca * g.ez[ez_idx] + cb * ((hx_j - hx_jm) * idy - (hy_i - hy_im) * idx);
+                let d1 = stretch::<ADE>(ade, ade_terms::EZ_Y, j, k * nx + i, (hx_j - hx_jm) * idy);
+                let d2 = stretch::<ADE>(ade, ade_terms::EZ_X, i, k * nx + j, (hy_i - hy_im) * idx);
+                g.ez[ez_idx] = ca * g.ez[ez_idx] + cb * (d1 - d2);
             }
         }
     }

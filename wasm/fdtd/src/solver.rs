@@ -182,6 +182,25 @@ impl Fdtd {
                 self.grid.ez[idx] -= dt * i_src / (eps * self.grid.dx * self.grid.dy);
                 v_term -= self.grid.ez[idx] * dz;
             }
+            if span > 1 {
+                // Distributed-port terminal plane (span > 1 only; the
+                // excitation above is unchanged). The recorded voltage
+                // EXCLUDES the topmost port cell's drop: measured on
+                // the efs fixture (characterization note §5/§8), that
+                // one cell carries the port's whole self-reactance —
+                // a ~660 fF series signature (≈ one dielectric cell)
+                // that is present with a shorted load and masks the
+                // load's own response; the remaining span−1 cells read
+                // clean. Defining the terminal plane at the top cell's
+                // lower face de-embeds it: the top cell becomes part
+                // of the feed structure, not of the source's terminals.
+                // (Excluding the BOTTOM cell was measured to change
+                // nothing; the H-loop currents around the port cells
+                // carry no independent information — they return
+                // ≈ −i_src at every height. See note §8.)
+                let idx_top = self.grid.ez_idx(si, sj, sk + span - 1);
+                v_term += self.grid.ez[idx_top] * dz;
+            }
             // Record the DELIVERED current i_src, not the Ampère loop:
             // the loop around a cell containing the impressed source
             // measures i_src + the cell's displacement current, whose
